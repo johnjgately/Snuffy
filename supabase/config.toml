@@ -1,0 +1,14 @@
+[functions.ai-proxy]
+verify_jwt = true
+
+[functions.oauth]
+verify_jwt = true
+
+[functions.oauth-handler]
+verify_jwt = true
+
+[functions.web-search]
+verify_jwt = true
+
+[functions.knowledge-rag]
+verify_jwt = true

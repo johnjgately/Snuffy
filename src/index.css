@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    border-color: theme('colors.bg.border');
+  }
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-bg-base text-ink-primary font-sans antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  ::selection {
+    background: rgba(34, 211, 238, 0.25);
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-bg-surface border border-bg-border rounded-xl;
+  }
+  .panel-elevated {
+    @apply bg-bg-elevated border border-bg-border rounded-xl;
+  }
+  .label-mono {
+    @apply font-mono text-xs uppercase tracking-wider text-ink-muted;
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.bg.hover') transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: theme('colors.bg.hover');
+    border-radius: 9999px;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, rgba(34, 211, 238, 0.04) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(34, 211, 238, 0.04) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
