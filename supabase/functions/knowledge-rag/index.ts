@@ -179,75 +179,40 @@ async function ragSearch(
   const queryEmbedding = await generateEmbedding(query, settings);
   if (!queryEmbedding) return [];
 
-  // Use pgvector similarity search
   const embeddingStr = `[${queryEmbedding.join(",")}]`;
-  let query_builder = supabase.rpc("rag_search", {
+
+  // Use server-side pgvector similarity search via rag_search RPC
+  const { data: ragResults, error: ragError } = await supabase.rpc("rag_search", {
     query_embedding: embeddingStr,
     top_k: topK,
+    p_user_id: userId,
+    p_knowledge_base_ids: knowledgeBaseIds.length > 0 ? knowledgeBaseIds : null,
   });
 
-  // Filter by knowledge base IDs if provided
-  const { data, error } = await supabase
-    .from("knowledge_chunks")
-    .select(`
-      id,
-      document_id,
-      knowledge_base_id,
-      chunk_text,
-      page_number,
-      slide_number,
-      sheet_name,
-      section,
-      cell_range,
-      embedding
-    `)
-    .eq("user_id", userId)
-    .in("knowledge_base_id", knowledgeBaseIds.length > 0 ? knowledgeBaseIds : (await supabase.from("knowledge_bases").select("id").eq("user_id", userId)).data?.map((kb: { id: string }) => kb.id) ?? [])
-    .limit(Math.min(topK, 20));
+  if (ragError || !ragResults) return [];
 
-  if (error || !data) return [];
-
-  // Compute cosine similarity client-side since we can't use raw SQL via the client
-  const results = data.map((chunk: {
-    id: string;
+  const results = (ragResults as Array<{
+    chunk_id: string;
     document_id: string;
+    knowledge_base_id: string;
     chunk_text: string;
     page_number: number | null;
     slide_number: number | null;
     sheet_name: string | null;
     section: string | null;
     cell_range: string | null;
-    embedding: string;
-  }) => {
-    let emb: number[] = [];
-    try {
-      emb = JSON.parse(chunk.embedding) as number[];
-    } catch {
-      emb = [];
-    }
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < Math.min(emb.length, queryEmbedding.length); i++) {
-      dotProduct += emb[i] * queryEmbedding[i];
-      normA += emb[i] * emb[i];
-      normB += queryEmbedding[i] * queryEmbedding[i];
-    }
-    const similarity = normA > 0 && normB > 0 ? dotProduct / (Math.sqrt(normA) * Math.sqrt(normB)) : 0;
-    return {
-      chunk_id: chunk.id,
-      document_id: chunk.document_id,
-      chunk_text: chunk.chunk_text,
-      page_number: chunk.page_number,
-      slide_number: chunk.slide_number,
-      sheet_name: chunk.sheet_name,
-      section: chunk.section,
-      cell_range: chunk.cell_range,
-      similarity,
-    };
-  });
-
-  results.sort((a, b) => b.similarity - a.similarity);
+    similarity: number;
+  }>).map((r) => ({
+    chunk_id: r.chunk_id,
+    document_id: r.document_id,
+    chunk_text: r.chunk_text,
+    page_number: r.page_number,
+    slide_number: r.slide_number,
+    sheet_name: r.sheet_name,
+    section: r.section,
+    cell_range: r.cell_range,
+    similarity: r.similarity,
+  }));
 
   // Fetch document names
   const docIds = [...new Set(results.map((r) => r.document_id))];
@@ -526,9 +491,11 @@ Deno.serve(async (req: Request) => {
         embeddingStatus = "unreachable";
       }
 
-      // Check vector DB (pgvector)
-      const { error: vecError } = await supabase.rpc("rag_health_check");
-      const vectorStatus = vecError ? "error" : "connected";
+      // Check vector DB (pgvector) via rag_health_check RPC
+      const { data: healthData, error: vecError } = await supabase.rpc("rag_health_check");
+      const vectorStatus = vecError ? "error" : (healthData?.status ?? "unknown");
+      const totalChunks = vecError ? 0 : (healthData?.total_chunks ?? 0);
+      const embeddedChunks = vecError ? 0 : (healthData?.embedded_chunks ?? 0);
 
       return jsonResponse({
         embedding: {
@@ -540,6 +507,9 @@ Deno.serve(async (req: Request) => {
         vectorDb: {
           provider: settings.vector_provider,
           status: vectorStatus,
+          vectorExtension: vecError ? "error" : (healthData?.vector_extension ?? "unknown"),
+          totalChunks,
+          embeddedChunks,
         },
       });
     }

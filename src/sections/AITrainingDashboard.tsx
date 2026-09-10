@@ -20,7 +20,7 @@ interface Stats {
 
 interface HealthState {
   embedding: { provider: string; model: string; endpoint: string; status: string } | null;
-  vectorDb: { provider: string; status: string } | null;
+  vectorDb: { provider: string; status: string; vectorExtension?: string; totalChunks?: number; embeddedChunks?: number } | null;
 }
 
 export function AITrainingDashboard({ onNavigate }: { onNavigate: (id: SectionId) => void }) {
@@ -170,6 +170,14 @@ export function AITrainingDashboard({ onNavigate }: { onNavigate: (id: SectionId
             <div className="flex items-center justify-between">
               <span className="text-xs text-ink-muted">Ready Documents</span>
               <span className="text-xs text-ink-primary font-medium">{stats.readyDocuments}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-ink-muted">Vector Extension</span>
+              <span className="text-xs text-ink-primary font-medium capitalize">{health.vectorDb?.vectorExtension ?? '—'}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-ink-muted">Embedded Chunks</span>
+              <span className="text-xs text-ink-primary font-medium">{health.vectorDb?.embeddedChunks ?? 0} / {health.vectorDb?.totalChunks ?? 0}</span>
             </div>
             <div className="flex items-center justify-between pt-2 border-t border-bg-border">
               <span className="text-xs text-ink-muted">Status</span>
