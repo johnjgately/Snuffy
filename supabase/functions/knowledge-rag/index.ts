@@ -14,6 +14,26 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+function validateEmbeddingEndpoint(endpoint: string): void {
+  const url = new URL(endpoint);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Invalid embedding endpoint.');
+  }
+  const host = url.hostname.toLowerCase();
+  const parts = host.split('.').map(Number);
+  const privateIpv4 = parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) && (
+    parts[0] === 10 ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168) ||
+    (parts[0] === 169 && parts[1] === 254) ||
+    parts[0] === 127 ||
+    parts[0] === 0
+  );
+  if (['localhost', '127.0.0.1', '0.0.0.0', '::1', 'metadata.google.internal'].includes(host) || privateIpv4 || host.startsWith('fc') || host.startsWith('fd')) {
+    throw new Error('Embedding endpoint is not allowed.');
+  }
+}
+
 interface KnowledgeSettings {
   embedding_provider: string;
   embedding_model: string;
@@ -100,6 +120,7 @@ async function generateEmbedding(
   text: string,
   settings: KnowledgeSettings,
 ): Promise<number[] | null> {
+  validateEmbeddingEndpoint(settings.embedding_endpoint);
   const endpoint = settings.embedding_endpoint.replace(/\/$/, "");
   try {
     const controller = new AbortController();
@@ -140,6 +161,7 @@ async function ragSearch(
   supabase: ReturnType<typeof createClient>,
   query: string,
   knowledgeBaseIds: string[],
+  userId: string,
   topK: number,
   settings: KnowledgeSettings,
 ): Promise<Array<{
@@ -179,8 +201,9 @@ async function ragSearch(
       cell_range,
       embedding
     `)
-    .in("knowledge_base_id", knowledgeBaseIds.length > 0 ? knowledgeBaseIds : (await supabase.from("knowledge_bases").select("id")).data?.map((kb: { id: string }) => kb.id) ?? [])
-    .limit(topK);
+    .eq("user_id", userId)
+    .in("knowledge_base_id", knowledgeBaseIds.length > 0 ? knowledgeBaseIds : (await supabase.from("knowledge_bases").select("id").eq("user_id", userId)).data?.map((kb: { id: string }) => kb.id) ?? [])
+    .limit(Math.min(topK, 20));
 
   if (error || !data) return [];
 
@@ -232,6 +255,7 @@ async function ragSearch(
     const { data: docs } = await supabase
       .from("knowledge_documents")
       .select("id, filename")
+      .eq("user_id", userId)
       .in("id", docIds);
     const docMap = new Map<string, string>();
     for (const d of docs ?? []) {
@@ -281,6 +305,7 @@ Deno.serve(async (req: Request) => {
         .from("knowledge_documents")
         .select("*")
         .eq("id", documentId)
+        .eq("user_id", user.id)
         .maybeSingle();
 
       if (docError || !doc) return jsonResponse({ error: "Document not found." }, 404);
@@ -290,7 +315,7 @@ Deno.serve(async (req: Request) => {
         status: "parsing",
         processing_stage: "Parsing document",
         updated_at: new Date().toISOString(),
-      }).eq("id", documentId);
+      }).eq("id", documentId).eq("user_id", user.id);
 
       // Download file from storage
       const { data: fileData, error: downloadError } = await supabase
@@ -303,7 +328,7 @@ Deno.serve(async (req: Request) => {
           status: "failed",
           processing_error: "Failed to download file from storage.",
           updated_at: new Date().toISOString(),
-        }).eq("id", documentId);
+        }).eq("id", documentId).eq("user_id", user.id);
         return jsonResponse({ error: "Failed to download file." }, 500);
       }
 
@@ -318,7 +343,7 @@ Deno.serve(async (req: Request) => {
         page_count: pages,
         processing_stage: "Chunking",
         updated_at: new Date().toISOString(),
-      }).eq("id", documentId);
+      }).eq("id", documentId).eq("user_id", user.id);
 
       // Chunk each extracted segment
       const allChunks: Array<{ text: string; metadata: ChunkMetadata }> = [];
@@ -334,7 +359,7 @@ Deno.serve(async (req: Request) => {
           status: "failed",
           processing_error: "No text content could be extracted from this file.",
           updated_at: new Date().toISOString(),
-        }).eq("id", documentId);
+        }).eq("id", documentId).eq("user_id", user.id);
         return jsonResponse({ error: "No text content extracted." }, 400);
       }
 
@@ -344,7 +369,7 @@ Deno.serve(async (req: Request) => {
         processing_stage: `Generating embeddings for ${allChunks.length} chunks`,
         chunk_count: allChunks.length,
         updated_at: new Date().toISOString(),
-      }).eq("id", documentId);
+      }).eq("id", documentId).eq("user_id", user.id);
 
       // Generate embeddings and insert chunks
       let embeddedCount = 0;
@@ -355,6 +380,7 @@ Deno.serve(async (req: Request) => {
         await supabase.from("knowledge_chunks").insert({
           document_id: documentId,
           knowledge_base_id: doc.knowledge_base_id,
+          user_id: user.id,
           chunk_index: i,
           chunk_text: chunk.text,
           page_number: chunk.metadata.page_number ?? null,
@@ -376,7 +402,7 @@ Deno.serve(async (req: Request) => {
         embedding_status: embeddedCount > 0 ? "complete" : "failed",
         ocr_status: "not_required",
         updated_at: new Date().toISOString(),
-      }).eq("id", documentId);
+      }).eq("id", documentId).eq("user_id", user.id);
 
       return jsonResponse({
         success: true,
@@ -396,7 +422,8 @@ Deno.serve(async (req: Request) => {
         supabase,
         query,
         knowledgeBaseIds ?? [],
-        topK ?? 5,
+        user.id,
+        Math.min(Number(topK) || 5, 20),
         settings,
       );
 
@@ -412,7 +439,8 @@ Deno.serve(async (req: Request) => {
         supabase,
         query,
         knowledgeBaseIds ?? [],
-        topK ?? 5,
+        user.id,
+        Math.min(Number(topK) || 5, 20),
         settings,
       );
 
@@ -446,6 +474,7 @@ Deno.serve(async (req: Request) => {
 
     // --- Health Check ---
     if (action === "health") {
+      validateEmbeddingEndpoint(settings.embedding_endpoint);
       const endpoint = settings.embedding_endpoint.replace(/\/$/, "");
       let embeddingStatus = "unknown";
       try {
@@ -519,10 +548,10 @@ Deno.serve(async (req: Request) => {
     // --- Get Stats ---
     if (action === "stats") {
       const [kbResult, docResult, chunkResult, readyResult] = await Promise.all([
-        supabase.from("knowledge_bases").select("id", { count: "exact", head: true }),
-        supabase.from("knowledge_documents").select("id", { count: "exact", head: true }),
-        supabase.from("knowledge_chunks").select("id", { count: "exact", head: true }),
-        supabase.from("knowledge_documents").select("id", { count: "exact", head: true }).eq("status", "ready"),
+        supabase.from("knowledge_bases").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+        supabase.from("knowledge_documents").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+        supabase.from("knowledge_chunks").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+        supabase.from("knowledge_documents").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("status", "ready"),
       ]);
 
       return jsonResponse({
@@ -535,7 +564,7 @@ Deno.serve(async (req: Request) => {
 
     return jsonResponse({ error: `Unknown action: ${action}` }, 400);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    console.error('knowledge-rag request failed', err);
+    return jsonResponse({ error: "The knowledge request could not be completed." }, 500);
   }
 });

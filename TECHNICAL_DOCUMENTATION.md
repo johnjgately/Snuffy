@@ -25,6 +25,12 @@ This document describes the repository as it currently exists. It also identifie
 
 ## 2. Current implementation status
 
+### Latest security review — 2026-09-10
+
+The deployed database and server functions were reviewed and hardened. Sensitive application tables now use account ownership checks, browser roles cannot read raw AI provider keys, direct browser access to shared secret/configuration tables is blocked, both document buckets are private and path-scoped, AI usage-counter execution is server-only, AI and embedding endpoints reject common private-network targets, RAG reads are account-scoped, and OAuth callbacks require a signed-in user plus a short-lived one-time state value. The duplicate OAuth handler is retired.
+
+Remaining production work includes building an administrator authorization path for user/role management, durable audit events, MFA enforcement through an identity provider, upload size/type enforcement, and end-to-end tests for the new policies. Existing ownerless legacy rows are retained but are not visible through the new owner-scoped policies until explicitly reassigned by a trusted operator.
+
 ### Implemented and connected
 
 - React application shell and responsive navigation
@@ -417,19 +423,16 @@ This section records implementation findings, not a substitute for a live databa
 
 ### Critical before production
 
-1. Restrict sensitive tables by owner, tenant, or administrator role instead of allowing every authenticated user to read and write all rows.
-2. Remove browser access to raw `ai_connections.api_key` and `oauth_configs.client_secret`.
-3. Make `knowledge-files` private and scope every object operation to an authenticated owner or authorized knowledge-base member.
-4. Add resource authorization inside service-role Edge Functions, not only JWT validation.
-5. Add outbound endpoint allowlists for AI and embedding providers to reduce SSRF risk.
-6. Complete OAuth state validation, PKCE, nonce, and session handling.
+1. Add an administrator-only server path for managing users, roles, permissions, and OAuth configuration; direct browser writes are now blocked.
+2. Add resource authorization for every remaining service-role operation and complete the knowledge-base membership model.
+3. Add outbound endpoint allowlists for all supported AI and embedding providers, including DNS re-resolution protection.
+4. Complete OAuth PKCE, nonce, and final Supabase session handling.
 7. Validate upload size, file type, decompression cost, and processing duration.
 8. Add rate limiting and abuse controls to AI, search, OAuth, and document-processing operations.
 
 ### Important hardening
 
-- Make the `documents` bucket private.
-- Replace the custom user directory's editable role and permission fields with server-enforced administration operations.
+- Add a server-enforced administration operation for the custom user directory's role and permission fields.
 - Scope search logs and automation runs to the appropriate owner, tenant, or administrator role.
 - Protect approval, classification, moderation, and audit fields from ordinary client updates.
 - Enforce single-row settings with a database constraint or a server-side upsert function.

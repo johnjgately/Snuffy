@@ -27,6 +27,39 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+function validateEndpoint(endpoint: string, provider: string): void {
+  const url = new URL(endpoint);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Invalid provider endpoint.');
+  }
+
+  const host = url.hostname.toLowerCase();
+  const blockedHosts = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', 'metadata.google.internal']);
+  const parts = host.split('.').map(Number);
+  const privateIpv4 = parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) && (
+    parts[0] === 10 ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168) ||
+    (parts[0] === 169 && parts[1] === 254) ||
+    parts[0] === 127 ||
+    parts[0] === 0
+  );
+  if (blockedHosts.has(host) || privateIpv4 || host.startsWith('fc') || host.startsWith('fd')) {
+    throw new Error('Provider endpoint is not allowed.');
+  }
+
+  const knownHosts = provider.includes('google') || provider.includes('gemini')
+    ? ['generativelanguage.googleapis.com']
+    : provider.includes('openai')
+      ? ['api.openai.com']
+      : provider.includes('anthropic')
+        ? ['api.anthropic.com']
+        : [];
+  if (knownHosts.length > 0 && !knownHosts.includes(host)) {
+    throw new Error('Provider endpoint is not allowed.');
+  }
+}
+
 async function callGemini(
   endpoint: string,
   apiKey: string,
@@ -140,12 +173,19 @@ Deno.serve(async (req: Request) => {
 
     const body = await req.json();
     const { action, connectionId, prompt, model } = body;
+    if (typeof connectionId !== 'string' || connectionId.length > 100) {
+      return jsonResponse({ error: 'Invalid connection.' }, 400);
+    }
+    if (typeof model !== 'undefined' && (typeof model !== 'string' || model.length > 200)) {
+      return jsonResponse({ error: 'Invalid model.' }, 400);
+    }
 
     // Fetch the connection (using service role to get api_key)
     const { data: conn, error: connError } = await supabase
       .from("ai_connections")
       .select("id, name, kind, provider, endpoint, models, enabled, status, api_key, key_masked")
       .eq("id", connectionId)
+      .eq("user_id", user.id)
       .single<ConnectionRow>();
 
     if (connError || !conn) {
@@ -153,6 +193,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const provider = conn.provider.toLowerCase();
+    validateEndpoint(conn.endpoint, provider);
     const apiKey = conn.api_key ?? "";
     const useModel = model || conn.models[0] || "";
 
@@ -181,14 +222,17 @@ Deno.serve(async (req: Request) => {
       }
 
       // Update status to healthy
-      await supabase.from("ai_connections").update({ status: "healthy" }).eq("id", connectionId);
+      await supabase.from("ai_connections").update({ status: "healthy" }).eq("id", connectionId).eq("user_id", user.id);
 
       return jsonResponse({ success: true, status: "healthy", reply: result.text });
     }
 
     if (action === "chat") {
-      if (!prompt || !prompt.trim()) {
+      if (typeof prompt !== 'string' || !prompt.trim()) {
         return jsonResponse({ error: "No prompt provided." }, 400);
+      }
+      if (prompt.length > 20000) {
+        return jsonResponse({ error: "Prompt is too long." }, 413);
       }
 
       let result;
@@ -222,7 +266,7 @@ Deno.serve(async (req: Request) => {
 
     return jsonResponse({ error: `Unknown action: ${action}` }, 400);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    console.error('ai-proxy request failed', err);
+    return jsonResponse({ error: "The AI request could not be completed." }, 500);
   }
 });
