@@ -14,6 +14,7 @@ import { AIConnections } from '@/sections/AIConnections';
 import { VoiceKeyboard } from '@/sections/VoiceKeyboard';
 import { Automations } from '@/sections/Automations';
 import { AuditLogs } from '@/sections/AuditLogs';
+import { StorageReview } from '@/sections/StorageReview';
 import { UsersRoles } from '@/sections/UsersRoles';
 import { FeatureFlags } from '@/sections/FeatureFlags';
 import { Integrations } from '@/sections/Integrations';
@@ -42,6 +43,7 @@ function Shell() {
       case 'voice-keyboard': return <VoiceKeyboard />;
       case 'automations': return <Automations />;
       case 'audit-logs': return <AuditLogs />;
+      case 'storage-review': return <StorageReview />;
       case 'users-roles': return <UsersRoles />;
       case 'feature-flags': return <FeatureFlags />;
       case 'integrations': return <Integrations />;

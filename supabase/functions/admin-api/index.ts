@@ -163,6 +163,42 @@ Deno.serve(async (req: Request) => {
         if (error) return jsonResponse({ error: "Could not load audit logs." }, 500);
         return jsonResponse({ logs: data ?? [] });
       }
+
+      if (resource === "storage-review") {
+        // Get bucket posture from storage.buckets
+        const { data: buckets } = await supabase
+          .from("storage.buckets")
+          .select("id, name, public, created_at, updated_at")
+          .order("name");
+
+        // Get all file metadata with owner info
+        const { data: files, error: filesError } = await supabase
+          .from("file_metadata")
+          .select("id, bucket_id, storage_path, owner_user_id, original_filename, mime_type, file_size, upload_date, retention_days, retention_expires_at, access_count, last_accessed_at")
+          .order("upload_date", { ascending: false })
+          .limit(500);
+
+        if (filesError) return jsonResponse({ error: "Could not load file metadata." }, 500);
+
+        // Get storage settings
+        const { data: settings } = await supabase
+          .from("storage_settings")
+          .select("allowed_mime_types, max_file_size_mb, default_retention_days")
+          .limit(1)
+          .maybeSingle();
+
+        return jsonResponse({
+          buckets: (buckets ?? []).map((b: { id: string; name: string; public: boolean; created_at: string; updated_at: string }) => ({
+            id: b.id,
+            name: b.name,
+            public: b.public,
+            created_at: b.created_at,
+            updated_at: b.updated_at,
+          })),
+          files: files ?? [],
+          settings: settings ?? { allowed_mime_types: [], max_file_size_mb: 50, default_retention_days: 90 },
+        });
+      }
     }
 
     if (req.method === "POST" || req.method === "PUT") {

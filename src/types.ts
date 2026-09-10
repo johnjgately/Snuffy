@@ -17,7 +17,8 @@ export type SectionId =
   | 'ai-training'
   | 'ai-knowledge-bases'
   | 'ai-knowledge-docs'
-  | 'ai-training-settings';
+  | 'ai-training-settings'
+  | 'storage-review';
 
 export type PrivacyMode = 'local' | 'connected' | 'custom';
 

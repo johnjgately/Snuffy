@@ -5,7 +5,7 @@ import { demoDocuments } from '@/data/demo';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/state/AppContext';
 import { cn } from '@/lib/utils';
-import { FileText, FileSpreadsheet, FileImage, Mail, FileType, Upload, Search, FolderOpen, FolderPlus, Tag, ShieldAlert, Scan, GitCompare, Clock, Quote, Trash2, FilePlus, X, Loader2, AlertCircle, CheckCircle2, Download } from 'lucide-react';
+import { FileText, FileSpreadsheet, FileImage, Mail, FileType, Upload, Search, FolderOpen, FolderPlus, Tag, ShieldAlert, Scan, GitCompare, Clock, Quote, Trash2, FilePlus, X, Loader2, AlertCircle, CheckCircle2, Download, Lock } from 'lucide-react';
 
 const typeIcon: Record<string, typeof FileText> = {
   PDF: FileText,
@@ -19,9 +19,20 @@ const typeIcon: Record<string, typeof FileText> = {
 
 const statusTone = { processed: 'success', processing: 'accent', queued: 'muted', flagged: 'danger' } as const;
 
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB fallback (server settings take precedence)
 
 const ACCEPTED_TYPES = '.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg,.gif,.webp,.eml,.msg';
+
+const ALLOWED_MIME_TYPES = new Set([
+  'application/pdf', 'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/csv', 'text/plain',
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  'message/rfc822', 'application/vnd.ms-outlook',
+  'application/octet-stream',
+]);
 
 interface DbFolder {
   id: string;
@@ -210,6 +221,19 @@ export function Documents() {
       return;
     }
 
+    // Client-side validation: file type
+    const mimeType = item.file.type || 'application/octet-stream';
+    if (!ALLOWED_MIME_TYPES.has(mimeType)) {
+      setUploadItems((prev) => prev.map((u) => (u.file === item.file ? { ...u, status: 'error', error: 'File type not allowed' } : u)));
+      return;
+    }
+
+    // Client-side validation: file size
+    if (item.file.size > MAX_FILE_SIZE) {
+      setUploadItems((prev) => prev.map((u) => (u.file === item.file ? { ...u, status: 'error', error: 'File exceeds 50 MB limit' } : u)));
+      return;
+    }
+
     const fileType = detectFileType(item.file);
     const safeName = item.file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
     const storagePath = `${userId}/${Date.now()}-${safeName}`;
@@ -217,7 +241,7 @@ export function Documents() {
     const { error: uploadError } = await supabase.storage
       .from('documents')
       .upload(storagePath, item.file, {
-        contentType: item.file.type || 'application/octet-stream',
+        contentType: mimeType,
         upsert: false,
       });
 
@@ -232,7 +256,7 @@ export function Documents() {
       file_size: item.file.size,
       storage_path: storagePath,
       folder_name: uploadFolder,
-      mime_type: item.file.type || 'application/octet-stream',
+      mime_type: mimeType,
       status: 'processed',
       tags: [],
       owner_user_id: userId,
@@ -248,19 +272,45 @@ export function Documents() {
       return;
     }
 
+    // Record file metadata for storage governance
+    await supabase.from('file_metadata').insert({
+      bucket_id: 'documents',
+      storage_path: storagePath,
+      owner_user_id: userId,
+      original_filename: item.file.name,
+      mime_type: mimeType,
+      file_size: item.file.size,
+    });
+
     setUploadItems((prev) => prev.map((u) => (u.file === item.file ? { ...u, status: 'done', progress: 100 } : u)));
     await loadDocuments();
   };
 
   const handleDownload = async (storagePath: string, fileName: string) => {
-    const { data, error } = await supabase.storage.from('documents').download(storagePath);
-    if (error) return;
-    const url = URL.createObjectURL(data);
+    // Use short-lived signed URL instead of direct download or permanent public URL
+    const { data, error } = await supabase.storage
+      .from('documents')
+      .createSignedUrl(storagePath, 60); // 60-second expiry
+    if (error || !data?.signedUrl) return;
     const a = document.createElement('a');
-    a.href = url;
+    a.href = data.signedUrl;
     a.download = fileName;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
     a.click();
-    URL.revokeObjectURL(url);
+    // Record access via RPC
+    const { data: meta } = await supabase
+      .from('file_metadata')
+      .select('id')
+      .eq('storage_path', storagePath)
+      .eq('bucket_id', 'documents')
+      .maybeSingle();
+    if (meta?.id) {
+      await supabase.rpc('record_file_access', {
+        p_file_metadata_id: meta.id,
+        p_action: 'download',
+      });
+    }
   };
 
   const handleDeleteDoc = async () => {
@@ -339,6 +389,7 @@ export function Documents() {
             <p className="text-sm text-ink-secondary">Drag files here or click to browse</p>
             <p className="text-xs text-ink-muted mt-1">PDF, Word, Excel, CSV, text, images, email — max 50 MB per file</p>
             <p className="text-xs text-warning mt-2 font-mono">All uploads are malware-scanned and treated as untrusted content</p>
+            <p className="text-xs text-success mt-1 font-mono flex items-center justify-center gap-1"><Lock className="h-3 w-3" aria-hidden="true" /> Private bucket — no public access</p>
           </div>
 
           {/* Upload progress list */}
