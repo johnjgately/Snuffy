@@ -7,7 +7,7 @@ import {
   Lock, Mail, ArrowRight, Zap, Eye, EyeOff, Loader2, AlertCircle, CheckCircle2,
   GraduationCap, Globe, MessageSquare, FileText, Search, BookOpen,
   Server, Layers, FileSearch, Sparkles,
-  Library, Settings2, Users, Flag, Plug,
+  Library, Settings2, Users, Flag, Plug, FileLock, KeyRound, Activity,
 } from 'lucide-react';
 
 const features = [
@@ -18,8 +18,8 @@ const features = [
   { icon: Database, title: 'Database Connections', desc: 'Connect external databases with role-based permissions. Query, inspect, and audit every interaction.' },
   { icon: Workflow, title: 'Automations & Tasks', desc: 'Schedule reports, set up data monitoring, and trigger AI tasks — all with explicit approval gates.' },
   { icon: Mic, title: 'Voice & Keyboard', desc: 'Hands-free operation with wake-word detection, push-to-talk, and on-device speech-to-text.' },
-  { icon: ScrollText, title: 'Full Audit Trail', desc: 'Every action is logged. Track who did what, when, and from where — with severity tagging.' },
-  { icon: ShieldCheck, title: 'Security & Governance', desc: 'Emergency stop, audit logs, MFA enforcement, and granular role-based access control built in.' },
+  { icon: ScrollText, title: 'Full Audit Trail', desc: 'Every action is logged. Track who did what, when, and from where — with severity tagging and tamper-resistant storage.' },
+  { icon: ShieldCheck, title: 'Security & Governance', desc: 'Emergency stop, audit logs, MFA enforcement, role-based access control, private storage, and file governance built in.' },
 ];
 
 const stats = [
@@ -38,10 +38,12 @@ const ragSteps = [
 ];
 
 const securityItems = [
-  { icon: ScrollText, title: 'Full audit trail', desc: 'Track every action with IP, timestamp, and severity.' },
-  { icon: Lock, title: 'Role-based access', desc: 'Five role tiers with granular per-module permissions.' },
-  { icon: Zap, title: 'Instant emergency stop', desc: 'One button halts all automations and AI activity.' },
+  { icon: ScrollText, title: 'Full audit trail', desc: 'Track every action with IP, timestamp, and severity. Logs are tamper-resistant.' },
+  { icon: Lock, title: 'Role-based access', desc: 'Five role tiers with granular per-module permissions and admin-only settings.' },
+  { icon: Zap, title: 'Instant emergency stop', desc: 'One button halts all automations and AI activity immediately.' },
   { icon: ShieldCheck, title: 'Privacy modes', desc: 'Local mode keeps all data on your machine. Connected mode allows cloud AI. Custom mode lets you decide.' },
+  { icon: FileLock, title: 'Private file storage', desc: 'Storage buckets are private by default. Downloads use signed URLs with expiration. Anonymous access is denied.' },
+  { icon: KeyRound, title: 'Secure API key handling', desc: 'API keys are encrypted at rest, never exposed to the browser, and API calls are proxied through server-side functions.' },
 ];
 
 const modules = [
@@ -61,6 +63,15 @@ const modules = [
   { icon: Flag, name: 'Feature Flags' },
   { icon: Plug, name: 'Integrations' },
   { icon: ShieldCheck, name: 'Security' },
+];
+
+const securityHighlights = [
+  'Row-level security on every table',
+  'Anonymous access denied by default',
+  'API keys never exposed to browser',
+  'Signed URL downloads with expiration',
+  'Server-side input validation',
+  'Admin-only settings changes',
 ];
 
 export function LandingPage() {
@@ -408,9 +419,9 @@ export function LandingPage() {
           </div>
           <h2 className="text-3xl font-bold tracking-tight">Built for trust, designed for control</h2>
           <p className="mt-4 text-lg text-ink-secondary max-w-2xl mx-auto leading-relaxed">
-            Every action is audited. Every automation requires approval. Emergency stop halts everything instantly. Your data stays yours.
+            Every action is audited. Every automation requires approval. Emergency stop halts everything instantly. Your data stays yours — with row-level security, private storage, and anonymous access denied by default.
           </p>
-          <div className="mt-10 grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="mt-10 grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {securityItems.map((item) => {
               const Icon = item.icon;
               return (
@@ -421,6 +432,22 @@ export function LandingPage() {
                 </div>
               );
             })}
+          </div>
+
+          {/* Security highlights bar */}
+          <div className="mt-12 panel rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-4 justify-center">
+              <Activity className="h-4 w-4 text-success" aria-hidden="true" />
+              <h3 className="text-sm font-semibold">Security hardening checklist</h3>
+            </div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-left">
+              {securityHighlights.map((item) => (
+                <div key={item} className="flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-success shrink-0" aria-hidden="true" />
+                  <span className="text-xs text-ink-secondary">{item}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </section>

@@ -27,6 +27,8 @@ import {
   Library,
   FolderSearch,
   Settings2,
+  FileLock,
+  Lock,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -46,8 +48,9 @@ const chapters: HelpChapter[] = [
     description: 'A high-level introduction to the system',
     content: [
       'Snuffy is a secure, AI-powered operations assistant. It brings together artificial intelligence, document management, database access, workflow automation, and governance into a single, unified workspace.',
-      'The system is designed for teams that need to work with sensitive data while maintaining strict oversight. Every action is logged, every automation requires approval, and every user has a clearly defined role.',
+      'The system is designed for teams that need to work with sensitive data while maintaining strict oversight. Every action is logged, every automation requires approval, and every user has a clearly defined role with permissions enforced at the database level.',
       'You interact with Snuffy through a conversational AI chat, voice commands, or a traditional point-and-click interface. Behind the scenes, it can connect to your databases, read and summarize your documents, run scheduled reports, and send alerts — all under your control.',
+      'Security is built in from the ground up: row-level security on every table, private storage buckets, anonymous access denied by default, API keys encrypted at rest and never exposed to the browser, and server-side validation on all inputs.',
     ],
   },
   {
@@ -119,6 +122,7 @@ const chapters: HelpChapter[] = [
       'The default embedding provider is Ollama, which runs entirely on your local machine. You can also use any OpenAI-compatible local embedding server. Enter the endpoint URL (such as http://localhost:11434 for Ollama), the model name, and the embedding dimension.',
       'The vector database uses pgvector, which is built into the PostgreSQL database that Snuffy already uses. No additional setup is needed. You can also configure chunk size (how large each text chunk is) and chunk overlap (how much adjacent chunks share text for context preservation).',
       'Use the Test Connection button to verify that your local embedding server is reachable. The health status cards at the top show whether the embedding service and vector database are currently connected.',
+      'Training settings can only be changed by administrators. This prevents standard users from redirecting embeddings to an external server or changing the vector database configuration.',
     ],
   },
   {
@@ -132,6 +136,7 @@ const chapters: HelpChapter[] = [
       'You can configure the maximum number of results (5, 10, or 20), the safe search level (off, moderate, or strict), and a search timeout. The Test Brave Connection and Test DuckDuckGo Fallback buttons perform real searches so you can verify that each provider is working.',
       'Every search is logged with the query, the provider that was used, whether a fallback occurred, the number of results, and how long the search took. You can review recent searches at the bottom of the page. When the AI uses search results, it includes numbered citations referencing the sources — it never fabricates URLs.',
       'When privacy mode is set to Local, all Internet search is disabled. No queries leave your environment, regardless of which AI provider or search provider is configured. This ensures that sensitive information stays private when you need it to.',
+      'Search settings can only be changed by administrators.',
     ],
   },
   {
@@ -143,6 +148,7 @@ const chapters: HelpChapter[] = [
       'The Documents section is your knowledge library. Upload PDFs, text files, spreadsheets, and other documents, and Snuffy will process them — extracting text, generating summaries, and making them searchable.',
       'Documents are organized into folders and can be tagged for easy filtering. Each document shows a processing status: queued, processing, processed, or flagged. Flagged documents may need your review before they become available to the AI.',
       'Processed documents become part of the knowledge base that the AI can reference during chat sessions, making your assistant smarter and more context-aware over time.',
+      'All files are stored in private storage buckets. Downloads use signed URLs that expire after 60 seconds. Anonymous users cannot access, list, upload, or download files from any storage bucket.',
     ],
   },
   {
@@ -165,6 +171,7 @@ const chapters: HelpChapter[] = [
       'The AI and Local Servers section is where you configure which AI models Snuffy can use. You can connect to cloud providers like OpenAI or Anthropic, or run your own local models using Ollama or LM Studio.',
       'Each connection shows its health status, the models available, and usage statistics including token counts and estimated cost. This helps you monitor spending and switch to cheaper or more private options when needed.',
       'Local servers give you complete privacy — your data never leaves your machine. Cloud providers may offer better quality but require an API key and send data over the internet.',
+      'API keys are encrypted at rest and never exposed to the browser. When the AI makes a request, it goes through a server-side edge function that holds the key — the browser never sees it.',
     ],
   },
   {
@@ -198,6 +205,7 @@ const chapters: HelpChapter[] = [
       'The Activity and Audit section records every action taken in the system: who did what, when, and from where. This is essential for compliance, security investigations, and understanding how your team uses the platform.',
       'Each entry shows the actor, the action, the target, the section it occurred in, the severity level, and the IP address. You can filter by severity to focus on warnings and critical events.',
       'Audit logs cannot be deleted or modified by regular users. They provide a tamper-resistant record that supports accountability and trust.',
+      'Audit events are created automatically for file access (downloads, previews, shares), record changes (creates, updates, deletes), role changes (assignments, revocations), and denied access attempts (RLS policy violations). You do not need to manually log anything — the system handles it through database triggers.',
     ],
   },
   {
@@ -209,6 +217,21 @@ const chapters: HelpChapter[] = [
       'The Users and Roles section manages who has access to the system and what they can do. Each user is assigned a role — Administrator, Operator, Analyst, Auditor, or Viewer — which determines their permissions.',
       'Administrators have full control. Operators can run and manage automations. Analysts can access data and AI features. Auditors can view logs and settings but cannot make changes. Viewers have read-only access.',
       'You can invite new users, suspend accounts, and track when each user was last active. Multi-factor authentication can be enabled per user for additional security.',
+      'Users can also be imported via OAuth2. Configure a provider (Google, GitHub, or Microsoft) in the OAuth2 settings, and users can sign in with their existing accounts. New users are automatically imported with the Viewer role.',
+      'Role assignments and permission changes are audited. Every time an administrator changes a user\'s role or updates a permission, an audit log entry is created automatically.',
+    ],
+  },
+  {
+    id: 'storage-review',
+    title: 'Storage Review',
+    icon: FileLock,
+    description: 'Admin overview of file storage security and governance',
+    content: [
+      'The Storage Review section gives administrators a comprehensive view of all files stored in the system. It shows which storage buckets exist, whether they are private, and what files are stored in each.',
+      'For each file, you can see the owner, upload date, file size, MIME type, classification level, and how many times it has been accessed. This helps you identify files that may need attention — large files, old files, or files with sensitive classifications.',
+      'Storage buckets are private by default. Anonymous users cannot list, upload, download, or delete files. Downloads use signed URLs that expire after 60 seconds, so links cannot be shared or reused.',
+      'File access is tracked. Every download, preview, and share is logged in the file access log, which you can review alongside the audit trail. This gives you a complete picture of who accessed what file and when.',
+      'Only administrators can access the Storage Review section. Standard users see only their own files in the Documents section.',
     ],
   },
   {
@@ -242,6 +265,8 @@ const chapters: HelpChapter[] = [
       'The Security and Settings section controls the overall safety posture of the system. This includes privacy modes, the emergency stop, data retention policies, and branding.',
       'Privacy modes determine how data flows through the system. In Local mode, everything stays on your machine. In Connected mode, data may be sent to cloud AI providers. Custom mode lets you choose exactly what is shared.',
       'The Emergency Stop button instantly halts all automations and AI activity. It is always accessible from the top bar. Use it if something unexpected happens and you need to stop everything immediately.',
+      'Security is enforced at multiple layers. Row-level security (RLS) policies on every table ensure users can only access their own data. Anonymous access is denied by default — the anon key cannot read, insert, update, or delete any protected data. Storage buckets are private and require authentication. API keys are encrypted at rest and never exposed to the browser.',
+      'Server-side edge functions validate all inputs before processing. Settings changes require admin role verification. The system uses a deny-by-default approach: anything not explicitly allowed is blocked.',
     ],
   },
   {
@@ -254,7 +279,8 @@ const chapters: HelpChapter[] = [
       'Next, upload some documents in the Documents section so the AI has context to work with. Tag and organize them into folders for easier management.',
       'Then, explore the AI Chat to start asking questions. If you need repetitive tasks handled automatically, create an automation in the Automations section. Finally, review the Security and Settings to make sure your privacy mode and permissions match your needs.',
       'If you want Snuffy to search the Internet for current information, visit the Internet Search section to verify that Brave Search is connected and enable automatic search. The AI will then automatically perform web searches when you ask about current events, latest news, or anything needing up-to-date information — with cited sources in every answer.',
-      'To build a local knowledge base, go to the AI Training section in the sidebar. Create a Knowledge Base, then upload documents to it in the Knowledge Documents section. Once documents are processed and approved, Snuffy will automatically search your knowledge base when you ask questions in AI Chat and cite the exact source — document name, page, slide, or sheet.'
+      'To build a local knowledge base, go to the AI Training section in the sidebar. Create a Knowledge Base, then upload documents to it in the Knowledge Documents section. Once documents are processed and approved, Snuffy will automatically search your knowledge base when you ask questions in AI Chat and cite the exact source — document name, page, slide, or sheet.',
+      'If you are an administrator, review the Storage Review section to see all files stored in the system, and the Users and Roles section to manage team members and permissions.',
     ],
   },
 ];

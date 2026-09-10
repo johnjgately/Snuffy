@@ -66,10 +66,10 @@ async function callGemini(
   model: string,
   prompt: string,
 ): Promise<{ text: string; usage?: { tokens: number } }> {
-  const url = `${endpoint.replace(/\/$/, "")}/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const url = `${endpoint.replace(/\/$/, "")}/v1beta/models/${model}:generateContent`;
   const resp = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
     }),

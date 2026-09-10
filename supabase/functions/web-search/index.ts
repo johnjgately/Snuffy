@@ -495,42 +495,58 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "updateSettings") {
-      const updates = body.settings;
+      const { data: roleData } = await supabase
+        .from("app_roles")
+        .select("role")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (roleData?.role !== "admin") return jsonResponse({ error: "Admin access required." }, 403);
+
+      const updates = body.settings ?? {};
+      const cleanEnabled = typeof updates.enabled === "boolean" ? updates.enabled : settings.enabled;
+      const cleanPrimary = typeof updates.primaryProvider === "string" ? updates.primaryProvider.slice(0, 50) : settings.primaryProvider;
+      const cleanFallback = typeof updates.fallbackProvider === "string" ? updates.fallbackProvider.slice(0, 50) : settings.fallbackProvider;
+      const cleanAutoFallback = typeof updates.autoFallback === "boolean" ? updates.autoFallback : settings.autoFallback;
+      const cleanAllowAuto = typeof updates.allowAutoSearch === "boolean" ? updates.allowAutoSearch : true;
+      const cleanMaxResults = typeof updates.maxResults === "number" && updates.maxResults > 0 && updates.maxResults <= 50 ? updates.maxResults : settings.maxResults;
+      const cleanSafeSearch = typeof updates.safeSearch === "string" && ["off", "moderate", "strict"].includes(updates.safeSearch) ? updates.safeSearch : settings.safeSearch;
+      const cleanTimeout = typeof updates.timeoutMs === "number" && updates.timeoutMs >= 1000 && updates.timeoutMs <= 60000 ? updates.timeoutMs : settings.timeoutMs;
+
       if (settingsRow) {
         const { error } = await supabase
           .from("search_settings")
           .update({
-            enabled: updates.enabled,
-            primary_provider: updates.primaryProvider,
-            fallback_provider: updates.fallbackProvider,
-            auto_fallback: updates.autoFallback,
-            allow_auto_search: updates.allowAutoSearch,
-            max_results: updates.maxResults,
-            safe_search: updates.safeSearch,
-            timeout_ms: updates.timeoutMs,
+            enabled: cleanEnabled,
+            primary_provider: cleanPrimary,
+            fallback_provider: cleanFallback,
+            auto_fallback: cleanAutoFallback,
+            allow_auto_search: cleanAllowAuto,
+            max_results: cleanMaxResults,
+            safe_search: cleanSafeSearch,
+            timeout_ms: cleanTimeout,
             updated_at: new Date().toISOString(),
           })
           .eq("id", settingsRow.id);
-        if (error) return jsonResponse({ error: error.message }, 500);
+        if (error) return jsonResponse({ error: "Failed to update settings." }, 500);
       } else {
         const { error } = await supabase.from("search_settings").insert({
-          enabled: updates.enabled,
-          primary_provider: updates.primaryProvider,
-          fallback_provider: updates.fallbackProvider,
-          auto_fallback: updates.autoFallback,
-          allow_auto_search: updates.allowAutoSearch,
-          max_results: updates.maxResults,
-          safe_search: updates.safeSearch,
-          timeout_ms: updates.timeoutMs,
+          enabled: cleanEnabled,
+          primary_provider: cleanPrimary,
+          fallback_provider: cleanFallback,
+          auto_fallback: cleanAutoFallback,
+          allow_auto_search: cleanAllowAuto,
+          max_results: cleanMaxResults,
+          safe_search: cleanSafeSearch,
+          timeout_ms: cleanTimeout,
         });
-        if (error) return jsonResponse({ error: error.message }, 500);
+        if (error) return jsonResponse({ error: "Failed to create settings." }, 500);
       }
       return jsonResponse({ success: true });
     }
 
-    return jsonResponse({ error: `Unknown action: ${action}` }, 400);
+    return jsonResponse({ error: "Unknown action." }, 400);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    console.error("web-search request failed", err);
+    return jsonResponse({ error: "The search request could not be completed." }, 500);
   }
 });

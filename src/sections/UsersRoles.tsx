@@ -368,7 +368,17 @@ export function UsersRoles() {
         return;
       }
       if (data.authUrl) {
-        window.location.href = data.authUrl;
+        const allowedHosts = ['accounts.google.com', 'github.com', 'login.microsoftonline.com'];
+        try {
+          const authUrl = new URL(data.authUrl);
+          if (!allowedHosts.includes(authUrl.hostname)) {
+            setError('The OAuth provider returned an unexpected redirect URL.');
+            return;
+          }
+          window.location.href = data.authUrl;
+        } catch {
+          setError('Invalid OAuth redirect URL.');
+        }
       }
     } catch {
       setError('Could not start OAuth flow. Make sure the OAuth provider is configured.');

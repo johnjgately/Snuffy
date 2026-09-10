@@ -151,11 +151,19 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: "Incomplete user info from provider." }, 502);
       }
 
-      const { data: existing } = await supabase
+      const { data: byOauthId } = await supabase
         .from("users")
         .select("id, name, email, role, status, mfa, oauth_provider, oauth_id")
-        .or(`oauth_id.eq.${userInfo.sub},email.eq.${userInfo.email}`)
+        .eq("oauth_id", userInfo.sub)
         .maybeSingle();
+
+      const { data: byEmail } = await supabase
+        .from("users")
+        .select("id, name, email, role, status, mfa, oauth_provider, oauth_id")
+        .eq("email", userInfo.email)
+        .maybeSingle();
+
+      const existing = byOauthId ?? byEmail;
 
       if (existing) {
         const newStatus = existing.status === "invited" ? "active" : existing.status;

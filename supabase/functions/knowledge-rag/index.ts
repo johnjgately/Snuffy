@@ -519,30 +519,45 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ settings });
     }
 
-    // --- Update Settings ---
+    // --- Update Settings (admin only) ---
     if (action === "updateSettings") {
-      const updates = body.settings;
+      const { data: roleData } = await supabase
+        .from("app_roles")
+        .select("role")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (roleData?.role !== "admin") return jsonResponse({ error: "Admin access required." }, 403);
+
+      const updates = body.settings ?? {};
+      const cleanEndpoint = typeof updates.embeddingEndpoint === "string" ? updates.embeddingEndpoint : settings.embedding_endpoint;
+      if (cleanEndpoint) validateEmbeddingEndpoint(cleanEndpoint);
+      const cleanProvider = typeof updates.embeddingProvider === "string" ? updates.embeddingProvider.slice(0, 50) : settings.embedding_provider;
+      const cleanModel = typeof updates.embeddingModel === "string" ? updates.embeddingModel.slice(0, 100) : settings.embedding_model;
+      const cleanDim = typeof updates.embeddingDim === "number" && updates.embeddingDim > 0 && updates.embeddingDim <= 4096 ? updates.embeddingDim : settings.embedding_dim;
+      const cleanVectorProvider = typeof updates.vectorProvider === "string" ? updates.vectorProvider.slice(0, 50) : settings.vector_provider;
+      const cleanChunkSize = typeof updates.chunkSize === "number" && updates.chunkSize > 0 && updates.chunkSize <= 10000 ? updates.chunkSize : settings.chunk_size;
+      const cleanChunkOverlap = typeof updates.chunkOverlap === "number" && updates.chunkOverlap >= 0 && updates.chunkOverlap < cleanChunkSize ? updates.chunkOverlap : settings.chunk_overlap;
       const { data: existing } = await supabase.from("knowledge_settings").select("id").limit(1).maybeSingle();
       if (existing) {
         await supabase.from("knowledge_settings").update({
-          embedding_provider: updates.embeddingProvider,
-          embedding_model: updates.embeddingModel,
-          embedding_endpoint: updates.embeddingEndpoint,
-          embedding_dim: updates.embeddingDim,
-          vector_provider: updates.vectorProvider,
-          chunk_size: updates.chunkSize,
-          chunk_overlap: updates.chunkOverlap,
+          embedding_provider: cleanProvider,
+          embedding_model: cleanModel,
+          embedding_endpoint: cleanEndpoint,
+          embedding_dim: cleanDim,
+          vector_provider: cleanVectorProvider,
+          chunk_size: cleanChunkSize,
+          chunk_overlap: cleanChunkOverlap,
           updated_at: new Date().toISOString(),
         }).eq("id", existing.id);
       } else {
         await supabase.from("knowledge_settings").insert({
-          embedding_provider: updates.embeddingProvider,
-          embedding_model: updates.embeddingModel,
-          embedding_endpoint: updates.embeddingEndpoint,
-          embedding_dim: updates.embeddingDim,
-          vector_provider: updates.vectorProvider,
-          chunk_size: updates.chunkSize,
-          chunk_overlap: updates.chunkOverlap,
+          embedding_provider: cleanProvider,
+          embedding_model: cleanModel,
+          embedding_endpoint: cleanEndpoint,
+          embedding_dim: cleanDim,
+          vector_provider: cleanVectorProvider,
+          chunk_size: cleanChunkSize,
+          chunk_overlap: cleanChunkOverlap,
         });
       }
       return jsonResponse({ success: true });
