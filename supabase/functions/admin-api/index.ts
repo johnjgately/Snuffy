@@ -1,0 +1,279 @@
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+};
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+async function getUser(req: Request, supabase: ReturnType<typeof createClient>) {
+  const header = req.headers.get("Authorization");
+  if (!header?.startsWith("Bearer ")) return null;
+  const { data } = await supabase.auth.getUser(header.slice(7));
+  return data.user ?? null;
+}
+
+async function requireAdmin(req: Request, supabase: ReturnType<typeof createClient>) {
+  const user = await getUser(req, supabase);
+  if (!user) return { user: null, ok: false, response: jsonResponse({ error: "Unauthorized." }, 401) };
+  const { data: roleRow } = await supabase
+    .from("app_roles")
+    .select("role")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (!roleRow || roleRow.role !== "admin") {
+    return { user, ok: false, response: jsonResponse({ error: "Administrator access required." }, 403) };
+  }
+  return { user, ok: true, response: null };
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+    );
+
+    const url = new URL(req.url);
+    const resource = url.searchParams.get("resource") ?? "";
+
+    // All resources require admin except role lookup (which any authenticated user can do for themselves)
+    if (resource === "my-role") {
+      const user = await getUser(req, supabase);
+      if (!user) return jsonResponse({ error: "Unauthorized." }, 401);
+      const { data: roleRow } = await supabase
+        .from("app_roles")
+        .select("role")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      return jsonResponse({ role: roleRow?.role ?? "standard_user" });
+    }
+
+    const { user, ok, response } = await requireAdmin(req, supabase);
+    if (!ok) return response;
+
+    if (req.method === "GET") {
+      if (resource === "users") {
+        const { data, error } = await supabase
+          .from("users")
+          .select("id, name, email, role, status, mfa, permissions, oauth_provider, oauth_id, avatar_url, last_active, created_at, owner_user_id")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load users." }, 500);
+        return jsonResponse({ users: data ?? [] });
+      }
+
+      if (resource === "roles") {
+        const { data, error } = await supabase
+          .from("app_roles")
+          .select("user_id, role, created_at, updated_at")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load roles." }, 500);
+        return jsonResponse({ roles: data ?? [] });
+      }
+
+      if (resource === "permissions") {
+        const { data, error } = await supabase
+          .from("role_permissions")
+          .select("id, capability, capability_icon, role, access_level")
+          .order("capability");
+        if (error) return jsonResponse({ error: "Could not load permissions." }, 500);
+        return jsonResponse({ permissions: data ?? [] });
+      }
+
+      if (resource === "managers") {
+        const { data, error } = await supabase
+          .from("manager_relationships")
+          .select("id, manager_id, managed_id, created_at")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load manager relationships." }, 500);
+        return jsonResponse({ managers: data ?? [] });
+      }
+
+      if (resource === "oauth-configs") {
+        const { data, error } = await supabase
+          .from("oauth_configs")
+          .select("id, provider, client_id, auth_url, token_url, userinfo_url, scopes, enabled, created_at")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load OAuth configurations." }, 500);
+        return jsonResponse({ configs: data ?? [] });
+      }
+    }
+
+    if (req.method === "POST" || req.method === "PUT") {
+      const body = await req.json();
+
+      if (resource === "users") {
+        if (!body.name || !body.email) return jsonResponse({ error: "Name and email are required." }, 400);
+        const row: Record<string, unknown> = {
+          name: String(body.name).slice(0, 200),
+          email: String(body.email).slice(0, 200),
+          role: typeof body.role === "string" ? body.role.slice(0, 50) : "Viewer",
+          status: typeof body.status === "string" ? body.status.slice(0, 20) : "invited",
+          mfa: Boolean(body.mfa),
+          permissions: Array.isArray(body.permissions) ? body.permissions : [],
+          owner_user_id: user.id,
+          created_by_user_id: user.id,
+          updated_by_user_id: user.id,
+        };
+        const { data, error: insertError } = await supabase.from("users").insert(row).select("id").single();
+        if (insertError) return jsonResponse({ error: "Could not create the user." }, 500);
+        return jsonResponse({ id: data.id });
+      }
+
+      if (resource === "users-update") {
+        if (!body.id) return jsonResponse({ error: "User ID is required." }, 400);
+        const update: Record<string, unknown> = { updated_by_user_id: user.id };
+        if (typeof body.name === "string") update.name = body.name.slice(0, 200);
+        if (typeof body.email === "string") update.email = body.email.slice(0, 200);
+        if (typeof body.role === "string") update.role = body.role.slice(0, 50);
+        if (typeof body.status === "string") update.status = body.status.slice(0, 20);
+        if (typeof body.mfa === "boolean") update.mfa = body.mfa;
+        const { error: updateError } = await supabase.from("users").update(update).eq("id", body.id);
+        if (updateError) return jsonResponse({ error: "Could not update the user." }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "users-delete") {
+        if (!body.id) return jsonResponse({ error: "User ID is required." }, 400);
+        const { error: deleteError } = await supabase.from("users").delete().eq("id", body.id);
+        if (deleteError) return jsonResponse({ error: "Could not delete the user." }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "role-assign") {
+        if (!body.user_id || !body.role) return jsonResponse({ error: "User ID and role are required." }, 400);
+        const role = String(body.role);
+        if (!["admin", "manager", "standard_user", "read_only"].includes(role)) {
+          return jsonResponse({ error: "Invalid role." }, 400);
+        }
+        const { error } = await supabase
+          .from("app_roles")
+          .upsert({ user_id: body.user_id, role }, { onConflict: "user_id" });
+        if (error) return jsonResponse({ error: "Could not assign the role." }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "manager-assign") {
+        if (!body.manager_id || !body.managed_id) return jsonResponse({ error: "Manager and managed user IDs are required." }, 400);
+        if (body.manager_id === body.managed_id) return jsonResponse({ error: "A user cannot manage themselves." }, 400);
+        const { error } = await supabase
+          .from("manager_relationships")
+          .upsert({ manager_id: body.manager_id, managed_id: body.managed_id }, { onConflict: "manager_id,managed_id" });
+        if (error) return jsonResponse({ error: "Could not assign the manager relationship." }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "manager-remove") {
+        if (!body.id) return jsonResponse({ error: "Relationship ID is required." }, 400);
+        const { error } = await supabase.from("manager_relationships").delete().eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not remove the manager relationship." }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "permissions") {
+        if (!body.capability || !body.role) return jsonResponse({ error: "Capability and role are required." }, 400);
+        const accessLevel = typeof body.access_level === "string" ? body.access_level : "none";
+        if (!["full", "admin", "write", "read", "none"].includes(accessLevel)) {
+          return jsonResponse({ error: "Invalid access level." }, 400);
+        }
+        const existing = await supabase
+          .from("role_permissions")
+          .select("id")
+          .eq("capability", body.capability)
+          .eq("role", body.role)
+          .maybeSingle();
+        if (existing.data) {
+          const { error } = await supabase
+            .from("role_permissions")
+            .update({ access_level: accessLevel, updated_by_user_id: user.id })
+            .eq("id", existing.data.id);
+          if (error) return jsonResponse({ error: "Could not update permission." }, 500);
+        } else {
+          const capIcon = typeof body.capability_icon === "string" ? body.capability_icon : "Cpu";
+          const { error } = await supabase.from("role_permissions").insert({
+            capability: String(body.capability).slice(0, 100),
+            capability_icon: capIcon,
+            role: String(body.role).slice(0, 50),
+            access_level: accessLevel,
+            owner_user_id: user.id,
+            created_by_user_id: user.id,
+            updated_by_user_id: user.id,
+          });
+          if (error) return jsonResponse({ error: "Could not set permission." }, 500);
+        }
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "permissions-add-capability") {
+        if (!body.capability) return jsonResponse({ error: "Capability name is required." }, 400);
+        const capName = String(body.capability).slice(0, 100);
+        const capIcon = typeof body.capability_icon === "string" ? body.capability_icon : "Cpu";
+        const roleOptions = ["Administrator", "Operator", "Analyst", "Auditor", "Viewer"];
+        const rows = roleOptions.map((role) => ({
+          capability: capName,
+          capability_icon: capIcon,
+          role,
+          access_level: "none",
+          owner_user_id: user.id,
+          created_by_user_id: user.id,
+          updated_by_user_id: user.id,
+        }));
+        const { error } = await supabase.from("role_permissions").insert(rows);
+        if (error) return jsonResponse({ error: "Could not add capability." }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "permissions-delete-capability") {
+        if (!body.capability) return jsonResponse({ error: "Capability name is required." }, 400);
+        const { error } = await supabase.from("role_permissions").delete().eq("capability", body.capability);
+        if (error) return jsonResponse({ error: "Could not delete capability." }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "oauth-config") {
+        if (!body.provider || !body.client_id || !body.client_secret) {
+          return jsonResponse({ error: "Provider, client ID, and client secret are required." }, 400);
+        }
+        const row: Record<string, unknown> = {
+          provider: String(body.provider).slice(0, 50),
+          client_id: String(body.client_id).slice(0, 500),
+          client_secret: String(body.client_secret).slice(0, 500),
+          enabled: true,
+          owner_user_id: user.id,
+          updated_by_user_id: user.id,
+        };
+        if (typeof body.auth_url === "string") row.auth_url = body.auth_url;
+        if (typeof body.token_url === "string") row.token_url = body.token_url;
+        if (typeof body.userinfo_url === "string") row.userinfo_url = body.userinfo_url;
+        if (typeof body.scopes === "string") row.scopes = body.scopes;
+
+        const existing = await supabase.from("oauth_configs").select("id").eq("provider", body.provider).maybeSingle();
+        if (existing.data) {
+          const { error } = await supabase.from("oauth_configs").update({ ...row, updated_by_user_id: user.id }).eq("id", existing.data.id);
+          if (error) return jsonResponse({ error: "Could not update OAuth configuration." }, 500);
+        } else {
+          const { error } = await supabase.from("oauth_configs").insert({ ...row, created_by_user_id: user.id });
+          if (error) return jsonResponse({ error: "Could not save OAuth configuration." }, 500);
+        }
+        return jsonResponse({ ok: true });
+      }
+    }
+
+    return jsonResponse({ error: "Unknown resource or action." }, 400);
+  } catch (err) {
+    console.error("admin-api request failed", err);
+    return jsonResponse({ error: "The request could not be completed." }, 500);
+  }
+});

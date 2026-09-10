@@ -235,6 +235,12 @@ export function Documents() {
       mime_type: item.file.type || 'application/octet-stream',
       status: 'processed',
       tags: [],
+      owner_user_id: userId,
+      created_by_user_id: userId,
+      updated_by_user_id: userId,
+      uploaded_by_user_id: userId,
+      original_filename: item.file.name,
+      classification: 'internal',
     });
 
     if (dbError) {

@@ -166,6 +166,7 @@ export function AIKnowledgeDocs() {
             classification: selectedClass,
             status: 'uploaded',
             uploaded_by: 'Administrator',
+            original_filename: file.name,
           })
           .select('id')
           .single();

@@ -74,6 +74,7 @@ export function UsersRoles() {
   const [oauthConfigs, setOAuthConfigs] = useState<Record<string, boolean>>({});
 
   const oauthFunctionUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/oauth`;
+  const adminApiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-api`;
   const [functionHeaders, setFunctionHeaders] = useState<Record<string, string>>({
     Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
     'Content-Type': 'application/json',
@@ -83,54 +84,63 @@ export function UsersRoles() {
     getAuthHeaders().then(setFunctionHeaders);
   }, []);
 
+  const adminApi = useCallback(async (resource: string, body?: Record<string, unknown>, method = 'POST') => {
+    const resp = await fetch(`${adminApiUrl}?resource=${resource}`, {
+      method,
+      headers: functionHeaders,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `Request failed (${resp.status})`);
+    return data;
+  }, [adminApiUrl, functionHeaders]);
+
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 4000);
   };
 
   const loadUsers = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('users')
-      .select('id, name, email, role, status, mfa, permissions, oauth_provider, oauth_id, avatar_url, last_active, created_at')
-      .order('created_at', { ascending: false });
-    if (error) {
+    try {
+      const data = await adminApi('users', undefined, 'GET');
+      const mapped: User[] = (data.users ?? []).map((r: Record<string, unknown>) => ({
+        id: r.id as string,
+        name: r.name as string,
+        email: r.email as string,
+        role: r.role as Role,
+        status: r.status as User['status'],
+        mfa: r.mfa as boolean,
+        lastActive: (r.last_active as string) ?? 'Never',
+        permissions: (r.permissions as string[]) ?? [],
+        oauthProvider: (r.oauth_provider as string) ?? undefined,
+        oauthId: (r.oauth_id as string) ?? undefined,
+        avatarUrl: (r.avatar_url as string) ?? undefined,
+      }));
+      setAllUsers([...mapped, ...demoUsers]);
+      setError(null);
+    } catch {
       setError('Could not load users.');
-      return;
     }
-    const mapped: User[] = (data ?? []).map((r: Record<string, unknown>) => ({
-      id: r.id as string,
-      name: r.name as string,
-      email: r.email as string,
-      role: r.role as Role,
-      status: r.status as User['status'],
-      mfa: r.mfa as boolean,
-      lastActive: (r.last_active as string) ?? 'Never',
-      permissions: (r.permissions as string[]) ?? [],
-      oauthProvider: (r.oauth_provider as string) ?? undefined,
-      oauthId: (r.oauth_id as string) ?? undefined,
-      avatarUrl: (r.avatar_url as string) ?? undefined,
-    }));
-    setAllUsers([...mapped, ...demoUsers]);
-    setError(null);
-  }, []);
+  }, [adminApi]);
 
   const loadOAuthConfigs = useCallback(async () => {
-    const { data } = await supabase
-      .from('oauth_configs')
-      .select('provider, enabled');
-    const map: Record<string, boolean> = {};
-    (data ?? []).forEach((r: Record<string, unknown>) => {
-      map[r.provider as string] = r.enabled as boolean;
-    });
-    setOAuthConfigs(map);
-  }, []);
+    try {
+      const data = await adminApi('oauth-configs', undefined, 'GET');
+      const map: Record<string, boolean> = {};
+      (data.configs ?? []).forEach((r: Record<string, unknown>) => {
+        map[r.provider as string] = r.enabled as boolean;
+      });
+      setOAuthConfigs(map);
+    } catch { /* may not be admin */ }
+  }, [adminApi]);
 
   const loadRolePerms = useCallback(async () => {
-    const { data, error } = await supabase.from('role_permissions').select('id, capability, capability_icon, role, access_level').order('capability');
-    if (error) return;
-    setRolePerms(data ?? []);
+    try {
+      const data = await adminApi('permissions', undefined, 'GET');
+      setRolePerms(data.permissions ?? []);
+    } catch { /* may not be admin */ }
     setPermLoading(false);
-  }, []);
+  }, [adminApi]);
 
   useEffect(() => {
     (async () => {
@@ -148,16 +158,15 @@ export function UsersRoles() {
   const handleAccessChange = async (capability: string, role: string, newLevel: string) => {
     const existing = rolePerms.find((p) => p.capability === capability && p.role === role);
     setPermSaving(true);
-    if (existing) {
-      const { error } = await supabase.from('role_permissions').update({ access_level: newLevel }).eq('id', existing.id);
-      if (error) { setError('Could not update permission.'); setPermSaving(false); return; }
-      setRolePerms((prev) => prev.map((p) => p.id === existing.id ? { ...p, access_level: newLevel } : p));
-    } else {
-      const capIcon = rolePerms.find((p) => p.capability === capability)?.capability_icon ?? 'Cpu';
-      const { data, error } = await supabase.from('role_permissions').insert({ capability, capability_icon: capIcon, role, access_level: newLevel }).select('id, capability, capability_icon, role, access_level').single();
-      if (error) { setError('Could not set permission.'); setPermSaving(false); return; }
-      setRolePerms((prev) => [...prev, data]);
-    }
+    try {
+      await adminApi('permissions', { capability, role, access_level: newLevel, capability_icon: existing?.capability_icon ?? 'Cpu' });
+      if (existing) {
+        setRolePerms((prev) => prev.map((p) => p.id === existing.id ? { ...p, access_level: newLevel } : p));
+      } else {
+        const capIcon = rolePerms.find((p) => p.capability === capability)?.capability_icon ?? 'Cpu';
+        setRolePerms((prev) => [...prev, { id: crypto.randomUUID(), capability, capability_icon: capIcon, role, access_level: newLevel }]);
+      }
+    } catch { setError('Could not update permission.'); }
     setPermSaving(false);
   };
 
@@ -170,14 +179,15 @@ export function UsersRoles() {
     }
     setPermSaving(true);
     setError(null);
-    const rows = roleOptions.map((role) => ({ capability: name, capability_icon: capForm.icon, role, access_level: 'none' }));
-    const { data, error } = await supabase.from('role_permissions').insert(rows).select('id, capability, capability_icon, role, access_level');
+    try {
+      await adminApi('permissions-add-capability', { capability: name, capability_icon: capForm.icon });
+      const newRows: RolePermission[] = roleOptions.map((role) => ({ id: crypto.randomUUID(), capability: name, capability_icon: capForm.icon, role, access_level: 'none' }));
+      setRolePerms((prev) => [...prev, ...newRows]);
+      setCapForm(emptyCapForm);
+      setShowAddCap(false);
+      showToast(`Capability "${name}" added.`);
+    } catch { setError('Could not add capability.'); }
     setPermSaving(false);
-    if (error) { setError('Could not add capability.'); return; }
-    setRolePerms((prev) => [...prev, ...(data ?? [])]);
-    setCapForm(emptyCapForm);
-    setShowAddCap(false);
-    showToast(`Capability "${name}" added.`);
   };
 
   const handleDeleteCapability = async () => {
@@ -185,11 +195,12 @@ export function UsersRoles() {
     const capName = deletingCap;
     setDeletingCap(null);
     setPermSaving(true);
-    const { error } = await supabase.from('role_permissions').delete().eq('capability', capName);
+    try {
+      await adminApi('permissions-delete-capability', { capability: capName });
+      setRolePerms((prev) => prev.filter((p) => p.capability !== capName));
+      showToast(`Capability "${capName}" removed.`);
+    } catch { setError('Could not delete capability.'); }
     setPermSaving(false);
-    if (error) { setError('Could not delete capability.'); return; }
-    setRolePerms((prev) => prev.filter((p) => p.capability !== capName));
-    showToast(`Capability "${capName}" removed.`);
   };
 
   const filtered = roleFilter === 'all' ? allUsers : allUsers.filter((u) => u.role === roleFilter);
@@ -203,34 +214,24 @@ export function UsersRoles() {
     }
     setSaving(true);
     setError(null);
-    const row = {
-      name: userForm.name.trim(),
-      email: userForm.email.trim(),
-      role: userForm.role,
-      status: userForm.status,
-      mfa: userForm.mfa,
-      permissions: [] as string[],
-    };
-    const { data, error: insertError } = await supabase.from('users').insert(row).select('id').single();
+    try {
+      const data = await adminApi('users', { name: userForm.name.trim(), email: userForm.email.trim(), role: userForm.role, status: userForm.status, mfa: userForm.mfa, permissions: [] });
+      const newUser: User = {
+        id: data.id,
+        name: userForm.name.trim(),
+        email: userForm.email.trim(),
+        role: userForm.role as Role,
+        status: userForm.status as User['status'],
+        mfa: userForm.mfa,
+        lastActive: 'Never',
+        permissions: [],
+      };
+      setAllUsers((prev) => [newUser, ...prev]);
+      setUserForm(emptyUserForm);
+      setShowAdd(false);
+      showToast(`User "${newUser.name}" added.`);
+    } catch { setError('Could not add the user. Please try again.'); }
     setSaving(false);
-    if (insertError) {
-      setError('Could not add the user. Please try again.');
-      return;
-    }
-    const newUser: User = {
-      id: data.id,
-      name: row.name,
-      email: row.email,
-      role: row.role as Role,
-      status: row.status as User['status'],
-      mfa: row.mfa,
-      lastActive: 'Never',
-      permissions: [],
-    };
-    setAllUsers((prev) => [newUser, ...prev]);
-    setUserForm(emptyUserForm);
-    setShowAdd(false);
-    showToast(`User "${row.name}" added.`);
   };
 
   // Invite a user (creates with 'invited' status)
@@ -241,34 +242,24 @@ export function UsersRoles() {
     }
     setSaving(true);
     setError(null);
-    const row = {
-      name: inviteForm.name.trim(),
-      email: inviteForm.email.trim(),
-      role: inviteForm.role,
-      status: 'invited',
-      mfa: false,
-      permissions: [] as string[],
-    };
-    const { data, error: insertError } = await supabase.from('users').insert(row).select('id').single();
+    try {
+      const data = await adminApi('users', { name: inviteForm.name.trim(), email: inviteForm.email.trim(), role: inviteForm.role, status: 'invited', mfa: false, permissions: [] });
+      const newUser: User = {
+        id: data.id,
+        name: inviteForm.name.trim(),
+        email: inviteForm.email.trim(),
+        role: inviteForm.role as Role,
+        status: 'invited',
+        mfa: false,
+        lastActive: 'Never',
+        permissions: [],
+      };
+      setAllUsers((prev) => [newUser, ...prev]);
+      setInviteForm(emptyUserForm);
+      setShowInvite(false);
+      showToast(`Invitation sent to ${newUser.email}`);
+    } catch { setError('Could not invite the user. Please try again.'); }
     setSaving(false);
-    if (insertError) {
-      setError('Could not invite the user. Please try again.');
-      return;
-    }
-    const newUser: User = {
-      id: data.id,
-      name: row.name,
-      email: row.email,
-      role: row.role as Role,
-      status: 'invited',
-      mfa: false,
-      lastActive: 'Never',
-      permissions: [],
-    };
-    setAllUsers((prev) => [newUser, ...prev]);
-    setInviteForm(emptyUserForm);
-    setShowInvite(false);
-    showToast(`Invitation sent to ${row.email}`);
   };
 
   // Edit user
@@ -285,28 +276,20 @@ export function UsersRoles() {
     }
     setSaving(true);
     setError(null);
-    const { error: updateError } = await supabase.from('users').update({
-      name: editForm.name.trim(),
-      email: editForm.email.trim(),
-      role: editForm.role,
-      status: editForm.status,
-      mfa: editForm.mfa,
-    }).eq('id', editingUser.id);
+    try {
+      await adminApi('users-update', { id: editingUser.id, name: editForm.name.trim(), email: editForm.email.trim(), role: editForm.role, status: editForm.status, mfa: editForm.mfa });
+      setAllUsers((prev) => prev.map((u) => u.id === editingUser.id ? {
+        ...u,
+        name: editForm.name.trim(),
+        email: editForm.email.trim(),
+        role: editForm.role as Role,
+        status: editForm.status as User['status'],
+        mfa: editForm.mfa,
+      } : u));
+      setEditingUser(null);
+      showToast('User updated successfully.');
+    } catch { setError('Could not update the user. Please try again.'); }
     setSaving(false);
-    if (updateError) {
-      setError('Could not update the user. Please try again.');
-      return;
-    }
-    setAllUsers((prev) => prev.map((u) => u.id === editingUser.id ? {
-      ...u,
-      name: editForm.name.trim(),
-      email: editForm.email.trim(),
-      role: editForm.role as Role,
-      status: editForm.status as User['status'],
-      mfa: editForm.mfa,
-    } : u));
-    setEditingUser(null);
-    showToast('User updated successfully.');
   };
 
   // Suspend/reactivate
@@ -314,8 +297,9 @@ export function UsersRoles() {
     const newStatus = u.status === 'suspended' ? 'active' : 'suspended';
     setAllUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, status: newStatus } : x));
     if (isCustom(u.id)) {
-      const { error } = await supabase.from('users').update({ status: newStatus }).eq('id', u.id);
-      if (error) {
+      try {
+        await adminApi('users-update', { id: u.id, status: newStatus });
+      } catch {
         setAllUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, status: u.status } : x));
         setError('Could not update the user. Please try again.');
         return;
@@ -335,12 +319,12 @@ export function UsersRoles() {
       return;
     }
     setAllUsers((prev) => prev.filter((u) => u.id !== id));
-    const { error } = await supabase.from('users').delete().eq('id', id);
-    if (error) {
+    try {
+      await adminApi('users-delete', { id });
+      showToast(`${name} has been removed.`);
+    } catch {
       setError('Could not delete the user. Please try again.');
       await loadUsers();
-    } else {
-      showToast(`${name} has been removed.`);
     }
   };
 
@@ -353,29 +337,8 @@ export function UsersRoles() {
     setSaving(true);
     setError(null);
     const prov = oauthProviders.find((p) => p.value === oauthForm.provider)!;
-    // Upsert: if config exists for this provider, update; otherwise insert
-    const { data: existing } = await supabase
-      .from('oauth_configs')
-      .select('id')
-      .eq('provider', oauthForm.provider)
-      .maybeSingle();
-
-    if (existing) {
-      const { error: updateError } = await supabase.from('oauth_configs').update({
-        client_id: oauthForm.clientId.trim(),
-        client_secret: oauthForm.clientSecret.trim(),
-        auth_url: prov.authUrl,
-        token_url: prov.tokenUrl,
-        userinfo_url: prov.userinfoUrl,
-        enabled: true,
-      }).eq('id', existing.id);
-      if (updateError) {
-        setError('Could not save OAuth configuration. Please try again.');
-        setSaving(false);
-        return;
-      }
-    } else {
-      const { error: insertError } = await supabase.from('oauth_configs').insert({
+    try {
+      await adminApi('oauth-config', {
         provider: oauthForm.provider,
         client_id: oauthForm.clientId.trim(),
         client_secret: oauthForm.clientSecret.trim(),
@@ -383,19 +346,13 @@ export function UsersRoles() {
         token_url: prov.tokenUrl,
         userinfo_url: prov.userinfoUrl,
         scopes: 'openid email profile',
-        enabled: true,
       });
-      if (insertError) {
-        setError('Could not save OAuth configuration. Please try again.');
-        setSaving(false);
-        return;
-      }
-    }
+      setOAuthConfigs((prev) => ({ ...prev, [oauthForm.provider]: true }));
+      setOauthForm(emptyOAuthConfig);
+      setShowOAuth(false);
+      showToast(`${prov.label} OAuth configured. You can now import users from ${prov.label}.`);
+    } catch { setError('Could not save OAuth configuration. Please try again.'); }
     setSaving(false);
-    setOAuthConfigs((prev) => ({ ...prev, [oauthForm.provider]: true }));
-    setOauthForm(emptyOAuthConfig);
-    setShowOAuth(false);
-    showToast(`${prov.label} OAuth configured. You can now import users from ${prov.label}.`);
   };
 
   // Initiate OAuth login flow
