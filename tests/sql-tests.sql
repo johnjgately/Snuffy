@@ -1,0 +1,155 @@
+-- ============================================================
+-- SQL Security Test Suite
+-- Run via Supabase MCP execute_sql tool, one statement per call.
+-- Tests: user isolation, admin access, ownership, audit, RAG health
+-- ============================================================
+--
+-- Setup (run these first):
+--
+-- INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, created_at, updated_at, aud, role)
+-- VALUES
+--   ('00000000-0000-0000-0000-000000000001', 'test-a@test.local', '', now(), now(), now(), 'authenticated', 'authenticated'),
+--   ('00000000-0000-0000-0000-000000000002', 'test-b@test.local', '', now(), now(), now(), 'authenticated', 'authenticated'),
+--   ('00000000-0000-0000-0000-000000000003', 'test-admin@test.local', '', now(), now(), now(), 'authenticated', 'authenticated')
+-- ON CONFLICT (id) DO NOTHING;
+--
+-- INSERT INTO app_roles (user_id, role) VALUES
+--   ('00000000-0000-0000-0000-000000000001', 'standard_user'),
+--   ('00000000-0000-0000-0000-000000000002', 'standard_user'),
+--   ('00000000-0000-0000-0000-000000000003', 'admin')
+-- ON CONFLICT DO NOTHING;
+--
+-- INSERT INTO documents (name, file_type, file_size, storage_path, folder_name, mime_type, status, tags, user_id, owner_user_id, created_by_user_id, updated_by_user_id, uploaded_by_user_id, original_filename, classification)
+-- VALUES ('Test Doc A', 'PDF', 1024, '00000000-0000-0000-0000-000000000001/test-a.pdf', 'Test', 'application/pdf', 'processed', '{}', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'Test Doc A.pdf', 'internal');
+--
+-- INSERT INTO documents (name, file_type, file_size, storage_path, folder_name, mime_type, status, tags, user_id, owner_user_id, created_by_user_id, updated_by_user_id, uploaded_by_user_id, original_filename, classification)
+-- VALUES ('Test Doc B', 'PDF', 2048, '00000000-0000-0000-0000-000000000002/test-b.pdf', 'Test', 'application/pdf', 'processed', '{}', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', 'Test Doc B.pdf', 'internal');
+--
+-- ============================================================
+-- TEST 1: Anonymous access denied (run each separately)
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '';
+-- SELECT count(*) FROM documents;           -- Expected: 0
+-- SELECT count(*) FROM file_metadata;        -- Expected: 0
+-- SELECT count(*) FROM audit_logs;           -- Expected: 0
+-- SELECT count(*) FROM knowledge_chunks;     -- Expected: 0
+--
+-- ============================================================
+-- TEST 2a: User A sees only own documents
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT count(*) FROM documents;           -- Expected: 1
+--
+-- ============================================================
+-- TEST 2b: User B sees only own documents
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000002","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT count(*) FROM documents;           -- Expected: 1
+--
+-- ============================================================
+-- TEST 3a: Admin sees all documents
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000003","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT count(*) FROM documents;           -- Expected: 2
+--
+-- ============================================================
+-- TEST 2c: User A cannot update User B's document
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- UPDATE documents SET name = 'Hacked' WHERE owner_user_id = '00000000-0000-0000-0000-000000000002';
+-- SELECT count(*) FROM documents WHERE name = 'Hacked';  -- Expected: 0
+--
+-- ============================================================
+-- TEST 2d: User A cannot delete User B's document
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- DELETE FROM documents WHERE owner_user_id = '00000000-0000-0000-0000-000000000002';
+-- SELECT count(*) FROM documents WHERE owner_user_id = '00000000-0000-0000-0000-000000000002';  -- Expected: 1
+--
+-- ============================================================
+-- TEST 4: Ownership assignment on creation
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- INSERT INTO documents (...) VALUES (...) RETURNING owner_user_id, created_by_user_id;
+-- Expected: owner_user_id = user A, created_by_user_id = user A
+--
+-- ============================================================
+-- TEST 5a: log_audit creates entry for file access
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT log_audit(p_action := 'file.download', p_entity_type := 'documents', p_metadata := '{}'::jsonb);
+-- Expected: returns a UUID (non-null)
+--
+-- ============================================================
+-- TEST 5b: log_audit creates entry for role change
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000003","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT log_audit(p_action := 'role.assign', p_entity_type := 'app_roles', p_metadata := '{}'::jsonb);
+-- Expected: returns a UUID (non-null)
+--
+-- ============================================================
+-- TEST 5c: log_audit creates entry for denied access
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT log_audit(p_action := 'access.denied', p_entity_type := 'documents', p_outcome := 'denied', p_metadata := '{}'::jsonb);
+-- Expected: returns a UUID (non-null)
+--
+-- ============================================================
+-- TEST 5d: record_file_access creates file_access_log entry
+-- ============================================================
+-- (Requires a file_metadata row first)
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT record_file_access(p_file_metadata_id := '<uuid>'::uuid, p_action := 'download');
+-- Expected: returns void (no error)
+--
+-- ============================================================
+-- TEST 5e: record_file_access increments access_count
+-- ============================================================
+-- SELECT access_count, last_accessed_at IS NOT NULL FROM file_metadata WHERE id = '<uuid>';
+-- Expected: access_count >= 2, last_accessed_at IS NOT NULL
+--
+-- ============================================================
+-- TEST 6a: rag_health_check returns vector extension status
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT vector_extension, total_chunks, embedded_chunks, status FROM rag_health_check();
+-- Expected: vector_extension = 'installed', status = 'connected' or 'empty'
+--
+-- ============================================================
+-- TEST 6b: rag_search returns results for matching query
+-- ============================================================
+-- (Requires a knowledge_chunks row with embedding)
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT chunk_id, chunk_text, similarity FROM rag_search(query_embedding := '<vector>'::vector, top_k := 5, p_user_id := '<user_a>'::uuid);
+-- Expected: returns >= 1 row with similarity > 0.9
+--
+-- ============================================================
+-- TEST 6c: rag_search respects user isolation
+-- ============================================================
+-- SET LOCAL request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000002","role":"authenticated"}';
+-- SET LOCAL ROLE authenticated;
+-- SELECT chunk_id, chunk_text, similarity FROM rag_search(query_embedding := '<vector>'::vector, top_k := 5, p_user_id := '<user_b>'::uuid);
+-- Expected: returns 0 rows
+--
+-- ============================================================
+-- Cleanup
+-- ============================================================
+-- DELETE FROM knowledge_chunks WHERE document_id = '<doc_id>';
+-- DELETE FROM knowledge_documents WHERE id = '<doc_id>';
+-- DELETE FROM knowledge_bases WHERE id = '<kb_id>';
+-- DELETE FROM file_metadata WHERE storage_path LIKE '<user_a>/audit-test.pdf';
+-- DELETE FROM documents WHERE name IN ('Test Doc A', 'Test Doc B', 'Ownership Test');
+-- DELETE FROM app_roles WHERE user_id IN ('<user_a>', '<user_b>', '<admin>');
+-- DELETE FROM auth.users WHERE id IN ('<user_a>', '<user_b>', '<admin>');
