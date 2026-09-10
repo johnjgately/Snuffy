@@ -1,6 +1,26 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
+async function logAudit(supabase: ReturnType<typeof createClient>, params: {
+  actor_user_id: string | null;
+  action: string;
+  entity_type?: string;
+  entity_id?: string;
+  outcome?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  try {
+    await supabase.rpc("log_audit", {
+      p_action: params.action,
+      p_entity_type: params.entity_type ?? null,
+      p_entity_id: params.entity_id ?? null,
+      p_outcome: params.outcome ?? "success",
+      p_actor_user_id: params.actor_user_id,
+      p_metadata: params.metadata ?? {},
+    });
+  } catch { /* audit logging must never break the request */ }
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -30,6 +50,8 @@ async function requireAdmin(req: Request, supabase: ReturnType<typeof createClie
     .eq("user_id", user.id)
     .maybeSingle();
   if (!roleRow || roleRow.role !== "admin") {
+    const reqUrl = new URL(req.url);
+    await logAudit(supabase, { actor_user_id: user?.id ?? null, action: "admin_api.denied", outcome: "denied", metadata: { resource: reqUrl.searchParams.get("resource") ?? "" } });
     return { user, ok: false, response: jsonResponse({ error: "Administrator access required." }, 403) };
   }
   return { user, ok: true, response: null };
@@ -52,7 +74,10 @@ Deno.serve(async (req: Request) => {
     // All resources require admin except role lookup (which any authenticated user can do for themselves)
     if (resource === "my-role") {
       const user = await getUser(req, supabase);
-      if (!user) return jsonResponse({ error: "Unauthorized." }, 401);
+      if (!user) {
+        await logAudit(supabase, { actor_user_id: null, action: "role_lookup.denied", outcome: "denied" });
+        return jsonResponse({ error: "Unauthorized." }, 401);
+      };
       const { data: roleRow } = await supabase
         .from("app_roles")
         .select("role")
@@ -109,6 +134,35 @@ Deno.serve(async (req: Request) => {
         if (error) return jsonResponse({ error: "Could not load OAuth configurations." }, 500);
         return jsonResponse({ configs: data ?? [] });
       }
+
+      if (resource === "audit-logs") {
+        const actor = url.searchParams.get("actor") ?? "";
+        const action = url.searchParams.get("action") ?? "";
+        const entityType = url.searchParams.get("entity_type") ?? "";
+        const outcome = url.searchParams.get("outcome") ?? "";
+        const entityId = url.searchParams.get("entity_id") ?? "";
+        const fromDate = url.searchParams.get("from_date") ?? "";
+        const toDate = url.searchParams.get("to_date") ?? "";
+        const limit = Math.min(Number(url.searchParams.get("limit") ?? 200), 500);
+
+        let query = supabase
+          .from("audit_logs")
+          .select("id, occurred_at, actor_user_id, actor_display_name, action, entity_type, entity_id, record_owner_user_id, file_path, outcome, request_id, source_ip, metadata")
+          .order("occurred_at", { ascending: false })
+          .limit(limit);
+
+        if (actor) query = query.eq("actor_user_id", actor);
+        if (action) query = query.ilike("action", `%${action}%`);
+        if (entityType) query = query.eq("entity_type", entityType);
+        if (outcome) query = query.eq("outcome", outcome);
+        if (entityId) query = query.eq("entity_id", entityId);
+        if (fromDate) query = query.gte("occurred_at", fromDate);
+        if (toDate) query = query.lte("occurred_at", `${toDate}T23:59:59.999Z`);
+
+        const { data, error } = await query;
+        if (error) return jsonResponse({ error: "Could not load audit logs." }, 500);
+        return jsonResponse({ logs: data ?? [] });
+      }
     }
 
     if (req.method === "POST" || req.method === "PUT") {
@@ -129,6 +183,7 @@ Deno.serve(async (req: Request) => {
         };
         const { data, error: insertError } = await supabase.from("users").insert(row).select("id").single();
         if (insertError) return jsonResponse({ error: "Could not create the user." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.create", entity_type: "users", entity_id: data.id, metadata: { name: row.name, email: row.email, role: row.role } });
         return jsonResponse({ id: data.id });
       }
 
@@ -142,6 +197,7 @@ Deno.serve(async (req: Request) => {
         if (typeof body.mfa === "boolean") update.mfa = body.mfa;
         const { error: updateError } = await supabase.from("users").update(update).eq("id", body.id);
         if (updateError) return jsonResponse({ error: "Could not update the user." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.update", entity_type: "users", entity_id: body.id, metadata: { fields: Object.keys(update) } });
         return jsonResponse({ ok: true });
       }
 
@@ -149,6 +205,7 @@ Deno.serve(async (req: Request) => {
         if (!body.id) return jsonResponse({ error: "User ID is required." }, 400);
         const { error: deleteError } = await supabase.from("users").delete().eq("id", body.id);
         if (deleteError) return jsonResponse({ error: "Could not delete the user." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.delete", entity_type: "users", entity_id: body.id });
         return jsonResponse({ ok: true });
       }
 
@@ -162,6 +219,7 @@ Deno.serve(async (req: Request) => {
           .from("app_roles")
           .upsert({ user_id: body.user_id, role }, { onConflict: "user_id" });
         if (error) return jsonResponse({ error: "Could not assign the role." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "role.assign", entity_type: "app_roles", entity_id: body.user_id, metadata: { role } });
         return jsonResponse({ ok: true });
       }
 
@@ -172,6 +230,7 @@ Deno.serve(async (req: Request) => {
           .from("manager_relationships")
           .upsert({ manager_id: body.manager_id, managed_id: body.managed_id }, { onConflict: "manager_id,managed_id" });
         if (error) return jsonResponse({ error: "Could not assign the manager relationship." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "manager.assign", entity_type: "manager_relationships", metadata: { manager_id: body.manager_id, managed_id: body.managed_id } });
         return jsonResponse({ ok: true });
       }
 
@@ -179,6 +238,7 @@ Deno.serve(async (req: Request) => {
         if (!body.id) return jsonResponse({ error: "Relationship ID is required." }, 400);
         const { error } = await supabase.from("manager_relationships").delete().eq("id", body.id);
         if (error) return jsonResponse({ error: "Could not remove the manager relationship." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "manager.remove", entity_type: "manager_relationships", entity_id: body.id });
         return jsonResponse({ ok: true });
       }
 
@@ -213,6 +273,7 @@ Deno.serve(async (req: Request) => {
           });
           if (error) return jsonResponse({ error: "Could not set permission." }, 500);
         }
+        await logAudit(supabase, { actor_user_id: user.id, action: "permission.update", entity_type: "role_permissions", entity_id: existing.data?.id, metadata: { capability: body.capability, role: body.role, access_level: accessLevel } });
         return jsonResponse({ ok: true });
       }
 
@@ -232,6 +293,7 @@ Deno.serve(async (req: Request) => {
         }));
         const { error } = await supabase.from("role_permissions").insert(rows);
         if (error) return jsonResponse({ error: "Could not add capability." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "permission.add_capability", entity_type: "role_permissions", metadata: { capability: capName } });
         return jsonResponse({ ok: true });
       }
 
@@ -239,6 +301,7 @@ Deno.serve(async (req: Request) => {
         if (!body.capability) return jsonResponse({ error: "Capability name is required." }, 400);
         const { error } = await supabase.from("role_permissions").delete().eq("capability", body.capability);
         if (error) return jsonResponse({ error: "Could not delete capability." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "permission.delete_capability", entity_type: "role_permissions", metadata: { capability: body.capability } });
         return jsonResponse({ ok: true });
       }
 
@@ -267,6 +330,7 @@ Deno.serve(async (req: Request) => {
           const { error } = await supabase.from("oauth_configs").insert({ ...row, created_by_user_id: user.id });
           if (error) return jsonResponse({ error: "Could not save OAuth configuration." }, 500);
         }
+        await logAudit(supabase, { actor_user_id: user.id, action: "oauth_config.save", entity_type: "oauth_configs", metadata: { provider: body.provider } });
         return jsonResponse({ ok: true });
       }
     }

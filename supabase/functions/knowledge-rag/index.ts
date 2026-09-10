@@ -404,6 +404,17 @@ Deno.serve(async (req: Request) => {
         updated_at: new Date().toISOString(),
       }).eq("id", documentId).eq("user_id", user.id);
 
+      // Audit log document processing
+      try {
+        await supabase.rpc("log_audit", {
+          p_action: "knowledge_document.process",
+          p_entity_type: "knowledge_documents",
+          p_entity_id: documentId,
+          p_actor_user_id: user.id,
+          p_metadata: { chunks: allChunks.length, embedded: embeddedCount, pages },
+        });
+      } catch { /* best-effort */ }
+
       return jsonResponse({
         success: true,
         documentId,
@@ -427,6 +438,17 @@ Deno.serve(async (req: Request) => {
         settings,
       );
 
+      // Audit log RAG search without storing query text
+      try {
+        await supabase.rpc("log_audit", {
+          p_action: "rag.search",
+          p_entity_type: "knowledge_chunks",
+          p_outcome: results.length > 0 ? "success" : "failed",
+          p_actor_user_id: user.id,
+          p_metadata: { result_count: results.length, knowledge_base_ids: knowledgeBaseIds ?? [] },
+        });
+      } catch { /* best-effort */ }
+
       return jsonResponse({ results, query, totalResults: results.length });
     }
 
@@ -443,6 +465,17 @@ Deno.serve(async (req: Request) => {
         Math.min(Number(topK) || 5, 20),
         settings,
       );
+
+      // Audit log RAG query without storing query text
+      try {
+        await supabase.rpc("log_audit", {
+          p_action: "rag.query",
+          p_entity_type: "knowledge_chunks",
+          p_outcome: results.length > 0 ? "success" : "failed",
+          p_actor_user_id: user.id,
+          p_metadata: { result_count: results.length, knowledge_base_ids: knowledgeBaseIds ?? [] },
+        });
+      } catch { /* best-effort */ }
 
       // Format context for AI
       const context = results.map((r, i) => {

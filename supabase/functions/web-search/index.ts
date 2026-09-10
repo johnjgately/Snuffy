@@ -332,6 +332,23 @@ async function performSearch(
     // Logging is best-effort
   }
 
+  // Audit log (no query text stored — only metadata)
+  try {
+    await supabase.rpc("log_audit", {
+      p_action: "web_search.request",
+      p_entity_type: "search_logs",
+      p_outcome: results.length > 0 ? "success" : "failed",
+      p_actor_user_id: user?.id ?? null,
+      p_metadata: {
+        provider,
+        is_fallback: isFallback,
+        result_count: results.length,
+        search_type: opts.searchType ?? "web",
+        execution_time_ms: executionTimeMs,
+      },
+    });
+  } catch { /* audit logging is best-effort */ }
+
   return {
     results,
     provider,
