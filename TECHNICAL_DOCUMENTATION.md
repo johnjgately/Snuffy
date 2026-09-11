@@ -4,7 +4,7 @@
 **Product:** Snuffy — AI Command Assistant
 **Frontend:** React 18, TypeScript, Vite
 **Backend platform:** Supabase
-**Last reviewed:** 2026-09-09
+**Last reviewed:** 2026-09-11
 
 ## 1. Purpose and scope
 
@@ -20,37 +20,62 @@ Snuffy is a browser-based command center for AI operations. The product combines
 - Audit and governance screens
 - User, role, feature-flag, integration, and security settings
 - Privacy modes and an emergency stop control
+- Storage review and file governance
+- Row-level security with RBAC enforcement
+- Tamper-resistant audit logging via database triggers
 
-This document describes the repository as it currently exists. It also identifies areas that are represented in the interface but are not yet fully connected to persistent backend behavior.
+This document describes the repository as it currently exists, including the security hardening, RBAC infrastructure, audit system, storage governance, and test coverage.
 
 ## 2. Current implementation status
 
-### Latest security review — 2026-09-10
+### Security review — 2026-09-11
 
-The deployed database and server functions were reviewed and hardened. Sensitive application tables now use account ownership checks, browser roles cannot read raw AI provider keys, direct browser access to shared secret/configuration tables is blocked, both document buckets are private and path-scoped, AI usage-counter execution is server-only, AI and embedding endpoints reject common private-network targets, RAG reads are account-scoped, and OAuth callbacks require a signed-in user plus a short-lived one-time state value. The duplicate OAuth handler is retired.
+The database, edge functions, and frontend have undergone a comprehensive security review and hardening pass. The following issues were identified and fixed:
 
-Remaining production work includes building an administrator authorization path for user/role management, durable audit events, MFA enforcement through an identity provider, upload size/type enforcement, and end-to-end tests for the new policies. Existing ownerless legacy rows are retained but are not visible through the new owner-scoped policies until explicitly reassigned by a trusted operator.
+**Database fixes:**
+- Revoked anonymous grants on 6 protected tables (documents, document_folders, file_access_log, file_metadata, role_permissions, storage_settings)
+- Fixed weak `WITH CHECK (true)` on UPDATE policies for 7 tables (knowledge_bases, knowledge_chunks, knowledge_documents, knowledge_settings, oauth_configs, search_settings, users) — all now enforce ownership or admin verification
+- Added RLS policies for oauth_states (was enabled but had no policies)
+- Replaced FOR ALL policies on app_roles and manager_relationships with per-verb policies (SELECT, INSERT, UPDATE, DELETE)
+- Revoked EXECUTE on 4 trigger functions from PUBLIC (audit_trigger_fn, set_ownership_on_insert, set_updated_at, set_updated_by_on_update)
+- Revoked EXECUTE on 10 SECURITY DEFINER helper functions from the anon role
+- Fixed audit trigger to handle tables without an `id` column
+- Fixed ownership trigger to handle tables missing `updated_by_user_id`
+- Added missing `updated_by_user_id` column to automation_runs, knowledge_chunks, and search_logs
+
+**Edge function fixes:**
+- Fixed PostgREST filter injection in OAuth callback (replaced `.or()` with parameterized queries)
+- Added admin role verification to knowledge-rag and web-search settings updates
+- Moved Gemini API key from URL query string to `x-goog-api-key` header
+- Replaced raw database error messages with generic messages in web-search
+- Added input validation and sanitization on all settings updates
+
+**Frontend fixes:**
+- Added OAuth redirect URL validation against an allowlist of known provider hosts (accounts.google.com, github.com, login.microsoftonline.com)
 
 ### Implemented and connected
 
 - React application shell and responsive navigation
 - Supabase email/password sign-up, sign-in, session restoration, and sign-out
-- Supabase PostgreSQL migrations and row-level security configuration
-- Supabase Storage buckets and storage policies
-- Five Supabase Edge Functions
+- Supabase PostgreSQL migrations with row-level security and RBAC
+- Supabase Storage buckets with private access and owner-scoped policies
+- Five Supabase Edge Functions (ai-proxy, web-search, knowledge-rag, oauth, admin-api)
 - AI chat requests through the AI proxy function
-- Web search through the web-search function
-- Knowledge retrieval requests through the knowledge-rag function
-- Browser persistence for selected interface preferences
-- Browser speech recognition and speech synthesis where supported
+- Web search through the web-search function with Brave and DuckDuckGo
+- Knowledge retrieval and RAG search through the knowledge-rag function
+- OAuth2 user import through the oauth function
+- Administrator API for user/role/permission management through the admin-api function
+- Tamper-resistant audit logging via database triggers on all protected tables
+- File access logging with download/preview/share tracking
+- Storage review section for administrators
+- Automated test suite (18 tests) covering anonymous access denial
+- SQL test suite covering user isolation, admin access, ownership, audit, and RAG health
 
 ### Partially implemented or demo-oriented
 
-- Several workspace pages use demo records and local React state rather than database-backed CRUD.
-- The custom user directory is separate from Supabase Auth users.
-- Audit events currently increase a local counter but are not written to a durable audit-events table.
-- OAuth configuration and callback code exist, but the OAuth flow does not visibly establish a normal Supabase browser session.
-- Some referenced RAG database functions are not represented in the repository migrations.
+- Several workspace pages use demo records and local React state alongside database-backed CRUD.
+- The custom user directory is synchronized with Supabase Auth users through the admin-api function but may diverge if users are managed directly in Supabase.
+- OAuth configuration and callback code exist and work for user import, but the OAuth flow does not establish a Supabase Auth session — it imports the user into the custom users table.
 
 ## 3. System architecture
 
@@ -63,23 +88,25 @@ Browser
   |      Email/password sessions and token refresh
   |
   +--> Supabase Data API
-  |      PostgreSQL tables protected by RLS
+  |      PostgreSQL tables protected by RLS + RBAC
+  |      SECURITY DEFINER functions for audit and ownership
   |
   +--> Supabase Storage
-  |      documents and knowledge-files buckets
+  |      documents bucket (private, owner-scoped)
+  |      knowledge-files bucket (private, owner-scoped)
   |
   +--> Supabase Edge Functions
-         ai-proxy
-         web-search
-         knowledge-rag
-         oauth
-         oauth-handler
+         ai-proxy      — AI provider chat and testing
+         web-search    — Brave/DuckDuckGo search
+         knowledge-rag — Document processing, RAG, settings
+         oauth         — OAuth2 user import
+         admin-api     — User/role/permission management
               |
               +--> AI providers, search providers, OAuth providers,
                    and embedding services
 ```
 
-There is no separate application server in this repository. Browser code talks directly to Supabase for authentication and selected table reads, and calls Edge Functions for operations that require server-side provider keys or service-role access.
+There is no separate application server in this repository. Browser code talks directly to Supabase for authentication and table reads (protected by RLS), and calls Edge Functions for operations that require server-side provider keys or service-role access.
 
 ## 4. Repository layout
 
@@ -102,9 +129,14 @@ src/
 supabase/
   config.toml              Edge Function JWT verification settings
   migrations/              Database, RLS, storage, index, and function SQL
-  functions/                Supabase Edge Function source code
+  functions/               Supabase Edge Function source code
 
-public/                    Static public assets, if added
+tests/
+  helpers.ts               Test client setup and constants
+  rls.test.ts              Automated anonymous access denial tests (18 tests)
+  sql-tests.sql            SQL test suite for authenticated-user scenarios
+
+vitest.config.ts           Vitest configuration
 ```
 
 ## 5. Frontend architecture
@@ -161,8 +193,6 @@ Available operations:
 - `signUp(email, password)` creates a Supabase Auth account.
 - `signOut()` ends the current Supabase session.
 
-The sign-up email does not need to match a Bolt account email. The app's login is separate from Bolt and separate from the Supabase dashboard account.
-
 ### Supabase client configuration
 
 The browser client reads these public build-time variable names:
@@ -172,7 +202,14 @@ The browser client reads these public build-time variable names:
 
 Only the public anonymous key belongs in browser code. Service-role keys and provider API keys must remain in Edge Function secrets or another server-only environment.
 
-`getAuthHeaders()` obtains the current access token and returns an Authorization header for Edge Function requests. If no session exists, it falls back to the anonymous key; protected functions should still reject unauthenticated requests.
+`getAuthHeaders()` obtains the current access token and returns an Authorization header for Edge Function requests. If no session exists, it falls back to the anonymous key; protected functions reject unauthenticated requests via JWT verification.
+
+### Security features in the frontend
+
+- OAuth redirect URLs are validated against an allowlist of known provider hosts before navigation.
+- API keys are never stored in or read from frontend code — all AI provider calls go through the ai-proxy edge function.
+- File downloads use signed URLs with 60-second expiration, not raw storage paths.
+- The landing page documents the security posture for users.
 
 ## 6. Feature inventory
 
@@ -201,6 +238,7 @@ Only the public anonymous key belongs in browser code. Service-role keys and pro
 
 - Activity & Audit
 - Users & Roles
+- Storage Review (admin only)
 - Feature Flags
 - Integrations
 - Security & Settings
@@ -235,224 +273,341 @@ The voice experience uses browser speech APIs when the browser supports them:
 - Text-to-speech responses
 - Configurable transcript and keyboard-history retention preferences
 
-Browser support and microphone permission are required. Voice functionality is not a substitute for server-side authentication or authorization.
+Browser support and microphone permission are required.
 
 ## 7. Database model
 
-All tables created by the repository migrations are intended to use Row Level Security. The exact effective policies in the deployed database should be checked against the database catalog before production launch.
+All tables use Row Level Security. Policies enforce ownership (`owner_user_id = auth.uid()`), admin access (`is_admin()`), or manager relationships. Anonymous access is denied on all protected tables.
+
+### RBAC infrastructure
+
+The database implements role-based access control through the following objects:
+
+- `app_roles` — Maps user IDs to roles (`admin`, `standard_user`). Per-verb policies: users can read their own role, admin can do everything.
+- `manager_relationships` — Maps managers to managed users. Admin-only writes; users can see their own manager/subordinate relationships.
+- `role_permissions` — Capability and role access levels for the permission matrix.
+- `is_admin()` — SECURITY DEFINER function that checks if `auth.uid()` has the `admin` role.
+- `is_manager_of(uuid)` — SECURITY DEFINER function that checks if the caller manages the given user.
+- `app_role(uuid)` — SECURITY DEFINER function that returns the role for a given user.
+- `can_read_record(text, uuid)` — Checks if the caller can read a record in a given table with a given owner. Returns true for owners, admins, and managers of the owner.
+- `can_write_record(text, uuid)` — Same as `can_read_record` but for write operations.
+- `current_user_id()` — Returns `auth.uid()`.
+
+### Ownership columns
+
+Every protected table has these columns (where applicable):
+
+- `owner_user_id` — The user who owns the record. Set automatically by the `set_ownership_on_insert` trigger if not provided.
+- `created_by_user_id` — The user who created the record. Set automatically.
+- `updated_by_user_id` — The user who last updated the record. Set automatically on insert and update.
+- `updated_at` — Timestamp of the last update. Set automatically.
+
+### Audit system
+
+The audit system uses database triggers to automatically log changes:
+
+- `audit_logs` — Stores audit events with action, entity type, entity ID, outcome, actor, record owner, IP, and metadata.
+- `file_access_log` — Stores file access events (download, preview, share) with actor, timestamp, and metadata.
+- `file_metadata` — Stores file governance data: bucket, path, owner, MIME type, size, upload date, retention, access count, last accessed.
+- `audit_trigger_fn()` — SECURITY DEFINER trigger function that fires on INSERT, UPDATE, DELETE for all protected tables. Uses `to_jsonb(NEW/OLD)` to dynamically extract `id` and `owner_user_id` without requiring those columns to exist.
+- `record_file_access(uuid, text, text, jsonb)` — SECURITY DEFINER function that creates a file_access_log entry and increments the access_count on file_metadata.
 
 ### Core tables
 
 #### `document_folders`
 
-Stores document folders. It has a nullable `user_id` for ownership. Legacy rows with a null owner remain visible to authenticated users under the current policy design.
+Stores document folders with ownership. Scoped to `owner_user_id = auth.uid()`.
 
 #### `documents`
 
-Stores owner-scoped document metadata:
-
-- Owner user ID
-- Name, type, MIME type, and byte size
-- Storage path and optional folder
-- Processing status
-- Tags and summary
-- Creation timestamp
-
-The intended policies scope reads and writes to `auth.uid() = user_id`.
+Stores owner-scoped document metadata: name, type, MIME type, size, storage path, folder, processing status, tags, summary, classification, and ownership columns. Policies use `can_read_record` and `can_write_record`.
 
 #### `ai_connections`
 
-Stores AI and local provider connections:
-
-- Name and provider type
-- Endpoint and available models
-- Enabled and health status
-- Usage tokens and cost
-- Masked key and stored API key
-
-The raw API key is sensitive and must not be exposed to ordinary browser clients. Current table-level authenticated policies do not provide column-level protection.
+Stores AI and local provider connections: name, provider, endpoint, models, enabled/health status, usage tokens, cost, masked key, and encrypted API key. The raw API key column is not selectable by the browser client. Policies use `can_read_record` and `can_write_record`.
 
 #### `automations`
 
-Stores automation definitions, including trigger, action, schedule, enabled status, last-run information, and run count.
+Stores automation definitions: trigger, action, schedule, enabled status, last-run info, run count, and ownership columns.
 
 #### `automation_runs`
 
-Stores automation execution history, status, output, summary, and timestamps.
+Stores automation execution history, status, output, summary, timestamps, and ownership columns.
 
 #### `users`
 
-Custom application directory containing names, emails, roles, statuses, MFA flags, permission arrays, avatar data, activity metadata, and OAuth identifiers.
-
-This table is not the same as Supabase's managed `auth.users` table and is not automatically populated by email/password registration unless application code performs that synchronization.
+Custom application directory: names, emails, roles, statuses, MFA flags, permissions, avatar data, activity metadata, and OAuth identifiers. This table is separate from Supabase's `auth.users`. Policies use `can_read_record` and `can_write_record`.
 
 #### `role_permissions`
 
-Stores capability and role access levels for the application permission matrix.
+Stores capability and role access levels for the permission matrix.
 
 #### `search_settings`
 
-Stores Internet search provider preferences, fallback behavior, result limits, safe-search mode, timeout, and enabled state. It is intended to behave as a single-row configuration table, but that invariant is not enforced by a database constraint.
+Stores Internet search provider preferences, fallback behavior, result limits, safe-search mode, timeout, and enabled state. Admin-only updates.
 
 #### `search_logs`
 
-Stores search query metadata, provider usage, fallback information, result URLs, timing, AI metadata, success state, and timestamps.
+Stores search query metadata, provider usage, fallback info, result URLs, timing, AI metadata, success state, timestamps, and ownership columns.
 
 ### Knowledge and RAG tables
 
 #### `knowledge_bases`
 
-Stores knowledge library names, descriptions, classification, and timestamps.
+Stores knowledge library names, descriptions, classification, and ownership columns. Policies use `can_read_record` and `can_write_record`.
 
 #### `knowledge_documents`
 
-Stores document processing records, including:
-
-- Knowledge-base association
-- File metadata and storage path
-- SHA-256 file hash and version
-- Classification
-- Processing and OCR status
-- Embedding status
-- Chunk and page counts
-- Approval fields and effective dates
+Stores document processing records: knowledge-base association, file metadata, storage path, SHA-256 hash, version, classification, processing/OCR/embedding status, chunk/page counts, approval fields, and ownership columns. Policies use `can_read_record` and `can_write_record`.
 
 #### `knowledge_chunks`
 
-Stores extracted text chunks and metadata, including page, slide, sheet, section, and cell-range references. Embeddings use `vector(1024)` and an IVFFlat cosine-similarity index.
+Stores extracted text chunks and metadata: page, slide, sheet, section, cell-range references. Embeddings use `vector(1024)` with an IVFFlat cosine-similarity index. Includes `updated_by_user_id` column. Policies use `can_read_record` and `can_write_record`.
 
 #### `knowledge_settings`
 
-Stores embedding provider, model, endpoint, vector provider, dimension, chunk size, and overlap. It is intended as a single-row configuration table without a database-enforced single-row constraint.
+Stores embedding provider, model, endpoint, vector provider, dimension, chunk size, and overlap. Admin-only updates.
 
-### Database function
+### Storage governance tables
 
-`increment_ai_usage(conn_id, token_count)` updates AI connection usage counters through a `SECURITY DEFINER` function. Public and anonymous execution is revoked in the final security migration. The deployed database should confirm that only the intended authenticated/server role can execute it.
+#### `file_metadata`
+
+Stores file governance data for every uploaded file: bucket ID, storage path, owner, original filename, MIME type, file size, upload date, retention policy, access count, last accessed timestamp. Policies scope to `owner_user_id = auth.uid()`.
+
+#### `file_access_log`
+
+Stores file access events: file metadata ID, action (download, preview, share), actor, timestamp, and metadata. Policies scope to `owner_user_id = auth.uid()`.
+
+#### `storage_settings`
+
+Stores allowed MIME types, maximum file size, and default retention policy. Select for all authenticated; update for admin only.
+
+### OAuth tables
+
+#### `oauth_configs`
+
+Stores OAuth provider configurations: provider, client ID, client secret, auth URL, token URL, userinfo URL, scopes, and enabled flag. Admin-only access.
+
+#### `oauth_states`
+
+Stores OAuth state values for CSRF protection: state, provider, user ID, expires_at, used_at. Policies scope to `user_id = auth.uid()`.
+
+### Database functions
+
+- `increment_ai_usage(conn_id, token_count)` — SECURITY DEFINER function that updates AI connection usage counters. Execution restricted to authenticated role.
+- `rag_search(query_embedding, top_k, p_user_id, p_knowledge_base_ids)` — SECURITY DEFINER function that performs vector similarity search. Scoped to the caller's user ID. Execution restricted to authenticated role.
+- `rag_health_check()` — SECURITY DEFINER function that returns vector extension status, total chunk count, and embedded chunk count. Execution restricted to authenticated role.
+- `log_audit(...)` — SECURITY DEFINER function for manual audit logging. Execution restricted to authenticated role.
+- `record_file_access(p_file_metadata_id, p_action, ...)` — SECURITY DEFINER function that logs file access and increments access count. Execution restricted to authenticated role.
 
 ### Extensions and indexes
 
-The knowledge migration enables the PostgreSQL `vector` extension. Indexes cover document ownership, folders, creation time, knowledge relationships, document hashes, processing status, and vector similarity.
+The `vector` extension is installed. Indexes cover document ownership, folders, creation time, knowledge relationships, document hashes, processing status, and vector similarity (IVFFlat cosine).
 
 ## 8. Storage
 
 ### `documents` bucket
 
-The repository creates this as a public bucket while also defining owner/path-based policies. The public setting conflicts with a private owner-scoped design and should be changed to private before storing sensitive documents.
+Private bucket (`public = false`). Storage policies scope to authenticated users only:
 
-Expected path format:
+- `auth_upload_own_documents` — INSERT: user can upload to their own path prefix.
+- `auth_read_own_documents` — SELECT: user can read from their own path prefix.
+- `auth_delete_own_documents` — DELETE: user can delete from their own path prefix.
 
-```text
-<authenticated-user-id>/<filename>
-```
+Expected path format: `<authenticated-user-id>/<filename>`
+
+Downloads use 60-second signed URLs. Anonymous access (list, download, upload) is denied.
 
 ### `knowledge-files` bucket
 
-The repository creates this as a private bucket, but its current policies allow anonymous and authenticated users to read, create, update, and delete objects without an owner or path restriction. This is a critical access-control gap for private knowledge files.
+Private bucket (`public = false`). Storage policies scope to authenticated users only:
+
+- `auth_upload_own_knowledge` — INSERT: user can upload to their own path prefix.
+- `auth_read_own_knowledge` — SELECT: user can read from their own path prefix.
+- `auth_delete_own_knowledge` — DELETE: user can delete from their own path prefix.
+
+Expected path format: `<authenticated-user-id>/<filename>`
+
+Anonymous access (list, download, upload) is denied.
 
 ## 9. Edge Functions
 
-All five functions are configured with `verify_jwt = true` in `supabase/config.toml`.
+All functions include CORS headers on every response (preflight, success, and error). All functions verify the caller's JWT before processing.
 
 ### `ai-proxy`
 
 Purpose:
 
 - Test AI provider connections
-- Send chat prompts to supported providers
-- Use server-side provider keys
-- Support cloud providers and local OpenAI-compatible endpoints
+- Send chat prompts to supported providers (OpenAI, Anthropic, Gemini, Ollama, LM Studio, vLLM)
+- Use server-side provider keys (never exposed to browser)
+- Support cloud and local OpenAI-compatible endpoints
 - Update health and usage information
+- Validate endpoint URLs to prevent SSRF (blocks localhost, 127.0.0.1, 0.0.0.0, ::1, metadata.google.internal)
+- Limit prompt size to 20,000 characters
 
-Expected request actions include `test` and `chat`.
+Security:
 
-Security requirements:
-
-- Validate the caller's JWT.
-- Authorize the caller for the selected connection.
-- Never return raw API keys.
-- Allowlist or otherwise restrict outbound endpoints to prevent server-side request forgery.
-- Limit prompt size, request duration, and provider response size.
+- JWT verification required.
+- API keys stored encrypted in the database, fetched server-side, never returned to the browser.
+- Gemini API key sent via `x-goog-api-key` header (not URL query string).
+- Endpoint validation prevents SSRF.
+- Input validation on connectionId and model parameters.
 
 ### `web-search`
 
 Purpose:
 
-- Search through Brave Search
-- Fall back to DuckDuckGo
+- Search through Brave Search with DuckDuckGo fallback
 - Apply safe-search and result-limit settings
 - Filter and sanitize returned URLs, titles, and snippets
 - Record search metadata
+- Admin-only settings updates with input validation
 
-The Brave key is expected to be stored as an Edge Function secret. Search result filtering covers several local/private address patterns, but outbound requests and configurable settings still require strict validation.
+Security:
+
+- JWT verification required.
+- Brave API key stored as Edge Function secret, never exposed to browser.
+- Settings updates require admin role verification.
+- All settings inputs are validated and sanitized (provider names, max results, safe search level, timeout).
+- Error responses return generic messages, not raw database errors.
 
 ### `knowledge-rag`
 
 Purpose:
 
-- Process knowledge documents
-- Extract and chunk text
-- Generate embeddings through Ollama or an OpenAI-compatible endpoint
-- Store chunks and embeddings
-- Retrieve context and citations
-- Report health, settings, and knowledge statistics
+- Process knowledge documents (parse, chunk, embed, index)
+- Generate embeddings through Ollama or OpenAI-compatible endpoints
+- Store chunks and embeddings in pgvector
+- Retrieve context and citations via server-side `rag_search` RPC
+- Report health via `rag_health_check` RPC
+- Admin-only settings updates with input validation
 
-Expected actions include `process`, `search`, `rag-query`, `health`, `getSettings`, `updateSettings`, and `stats`.
+Security:
 
-The function uses service-role access, so JWT validation alone is not sufficient. It must also enforce document ownership, knowledge-base permissions, file limits, content-type limits, and safe outbound endpoint rules.
+- JWT verification required.
+- Document operations scoped to `user_id = user.id`.
+- Settings updates require admin role verification.
+- Embedding endpoint validated to prevent SSRF.
+- All settings inputs are validated and sanitized (provider, model, endpoint, dimension, chunk size, overlap).
+- RAG search is user-scoped — users only see their own chunks.
 
-The code references `rag_search` and `rag_health_check`. Those database functions are not present in the repository migrations; they must either exist in the deployed database or be implemented before relying on those paths.
+### `oauth`
 
-### `oauth` and `oauth-handler`
+Purpose:
 
-These functions read enabled provider configuration, create authorization URLs, exchange authorization codes, fetch provider profiles, and update rows in the custom `users` table.
+- Read enabled provider configurations
+- Create authorization URLs with CSRF state tokens
+- Exchange authorization codes for access tokens
+- Fetch provider user profiles
+- Import or update users in the custom users table
 
-The repository contains two similar OAuth functions. Keeping one canonical implementation would reduce maintenance and deployment ambiguity.
+Security:
 
-The OAuth flow requires additional protections before production use:
+- JWT verification required.
+- Provider URLs validated to prevent SSRF (blocks localhost, internal IPs, metadata endpoints).
+- OAuth state is single-use, bound to the user, and expires after 10 minutes.
+- State is atomically claimed (concurrent requests cannot reuse it).
+- PostgREST filter injection fixed — user lookup uses separate parameterized queries instead of `.or()`.
+- Client secrets fetched server-side, never exposed to browser.
+- Input validation on provider, code, and state parameters (length limits).
 
-- Validate a single-use state value on callback.
-- Bind state to the initiating browser/session.
-- Use PKCE and nonce where supported.
-- Avoid returning provider token-exchange details to the browser.
-- Do not expose client secrets through table reads.
-- Establish or clearly document the resulting Supabase Auth session behavior.
+### `admin-api`
 
-## 10. Security posture and priority actions
+Purpose:
 
-This section records implementation findings, not a substitute for a live database security review.
+- User management (list, create, update, delete, suspend/reactivate)
+- Role and permission management (permission matrix, capability CRUD)
+- OAuth configuration management
 
-### Critical before production
+Security:
 
-1. Add an administrator-only server path for managing users, roles, permissions, and OAuth configuration; direct browser writes are now blocked.
-2. Add resource authorization for every remaining service-role operation and complete the knowledge-base membership model.
-3. Add outbound endpoint allowlists for all supported AI and embedding providers, including DNS re-resolution protection.
-4. Complete OAuth PKCE, nonce, and final Supabase session handling.
-7. Validate upload size, file type, decompression cost, and processing duration.
-8. Add rate limiting and abuse controls to AI, search, OAuth, and document-processing operations.
+- JWT verification required.
+- Admin role verification required for all operations.
+- Service-role access for database operations.
 
-### Important hardening
+## 10. Security posture
 
-- Add a server-enforced administration operation for the custom user directory's role and permission fields.
-- Scope search logs and automation runs to the appropriate owner, tenant, or administrator role.
-- Protect approval, classification, moderation, and audit fields from ordinary client updates.
-- Enforce single-row settings with a database constraint or a server-side upsert function.
-- Add a durable audit-event table and write events server-side for security-sensitive actions.
-- Remove or reconcile duplicate OAuth implementations.
-- Confirm the deployed database contains all RPC functions referenced by Edge Functions.
-- Never place service-role or provider secrets in `VITE_` variables or frontend source.
+### Access control model
+
+The system uses a deny-by-default approach:
+
+1. **Anonymous access is denied** on all protected tables, storage buckets, and RPC functions. The anon role has no grants on any protected table.
+2. **Row-level security** is enabled on every table. Policies enforce ownership (`owner_user_id = auth.uid()`), admin access (`is_admin()`), or manager relationships.
+3. **SECURITY DEFINER functions** are restricted to the authenticated role. Trigger functions are restricted from PUBLIC (only callable by triggers, not via the API).
+4. **Storage buckets** are private. Downloads use signed URLs with 60-second expiration.
+5. **API keys** are encrypted at rest and fetched server-side. The browser never sees raw API keys.
+6. **Settings updates** require admin role verification in the edge function.
+7. **Input validation** is performed server-side on all user-supplied parameters.
+
+### Audit logging
+
+Audit events are created automatically by database triggers for:
+
+- File access (download, preview, share)
+- Record changes (create, update, delete) on all protected tables
+- Role changes (assignment, revocation)
+- Denied access (RLS policy violations can be manually logged)
+
+Audit logs are tamper-resistant — regular users cannot delete or modify them. Only admins can read all audit logs; standard users see only their own.
+
+### Remaining hardening items
+
+- Add rate limiting to AI, search, OAuth, and document-processing operations.
+- Add upload size enforcement at the storage policy level (currently enforced in edge function code).
+- Complete OAuth PKCE and nonce support.
+- Add DNS re-resolution protection for outbound endpoint validation.
+- Enforce single-row settings with a database constraint.
 
 ## 11. Configuration and secrets
 
 The application requires the Supabase URL and anonymous browser key as frontend configuration. Server-only secrets should be configured for Edge Functions, such as:
 
-- AI provider API keys
-- Brave Search API key
-- OAuth client secrets
-- Service-role access used internally by trusted Edge Functions
+- AI provider API keys (stored encrypted in `ai_connections` table)
+- Brave Search API key (stored as Edge Function secret)
+- OAuth client secrets (stored in `oauth_configs` table, fetched server-side)
+- Service-role access used internally by Edge Functions
 
 Secret values are intentionally not documented here. Do not commit secret values to the repository, place them in client-visible code, or paste them into public issue trackers.
 
-## 12. Local development and verification
+## 12. Testing
+
+### Automated tests
+
+Run with `npm test`. Uses Vitest.
+
+**`tests/rls.test.ts`** — 18 tests verifying anonymous access denial:
+- Anonymous cannot read: documents, file_metadata, audit_logs, file_access_log, knowledge_chunks, knowledge_bases, users, app_roles, storage_settings
+- Anonymous cannot insert/delete documents
+- Anonymous cannot call: rag_health_check, rag_search, record_file_access
+- Anonymous cannot download/upload to: documents bucket, knowledge-files bucket
+
+### SQL test suite
+
+**`tests/sql-tests.sql`** — Documented SQL assertions for authenticated-user scenarios, run via the Supabase MCP `execute_sql` tool using `SET LOCAL ROLE authenticated` to simulate real user contexts:
+
+- User A sees only own documents (not User B's)
+- User B sees only own documents (not User A's)
+- Admin sees all documents
+- User A cannot update User B's documents
+- User A cannot delete User B's documents
+- Ownership columns set correctly on insert
+- `log_audit` creates entries for file access, role changes, denied access, record updates
+- `record_file_access` creates file_access_log entries and increments access_count
+- `rag_health_check` returns vector extension status and chunk counts
+- `rag_search` returns matching results and respects user isolation
+
+### Test scripts
+
+| Script | Purpose |
+|---|---|
+| `npm test` | Run the automated test suite |
+| `npm run test:watch` | Run tests in watch mode |
+| `npm run typecheck` | Run the TypeScript compiler without emitting files |
+| `npm run lint` | Run ESLint over the project |
+| `npm run build` | Create a production frontend build |
+
+## 13. Local development and verification
 
 Available package scripts:
 
@@ -463,22 +618,23 @@ Available package scripts:
 | `npm run typecheck` | Run the TypeScript compiler without emitting files |
 | `npm run lint` | Run ESLint over the project |
 | `npm run preview` | Preview the production build locally |
+| `npm test` | Run the automated test suite |
 
 Recommended verification sequence:
 
-1. Confirm the app loads and the public landing page appears.
-2. Create an app account using the landing-page sign-up form.
-3. Sign out and sign back in.
-4. Confirm the authenticated shell and navigation render.
-5. Test privacy mode and emergency stop behavior.
-6. Add an AI connection only after server-side key handling is confirmed.
-7. Test AI chat with a local provider before enabling cloud providers.
-8. Test web search and confirm failure states are visible.
-9. Test knowledge upload and processing with a non-sensitive sample file.
-10. Run type checking, linting, and the production build.
-11. Review database RLS and storage policies in the deployed project.
+1. Run `npm test` to verify anonymous access is denied.
+2. Run the SQL test suite via `execute_sql` to verify user isolation and audit.
+3. Confirm the app loads and the public landing page appears.
+4. Create an app account using the landing-page sign-up form.
+5. Sign out and sign back in.
+6. Confirm the authenticated shell and navigation render.
+7. Test privacy mode and emergency stop behavior.
+8. Add an AI connection and test chat with a local provider.
+9. Test web search and confirm failure states are visible.
+10. Test knowledge upload and processing with a non-sensitive sample file.
+11. Run `npm run build` to verify the production build.
 
-## 13. Deployment checklist
+## 14. Deployment checklist
 
 ### Frontend
 
@@ -492,12 +648,14 @@ Recommended verification sequence:
 
 - All migrations are applied in order.
 - RLS is enabled on every exposed application table.
-- Policies are owner-, tenant-, or role-scoped.
-- Storage buckets are private unless public access is intentional.
+- Policies are owner-, admin-, or manager-scoped.
+- Anonymous grants are revoked on all protected tables.
+- Storage buckets are private.
 - Storage object policies match the intended owner/path model.
 - Edge Functions are deployed with JWT verification enabled.
 - Edge Function secrets exist and are server-only.
-- Service-role functions enforce resource authorization.
+- SECURITY DEFINER functions have EXECUTE revoked from anon.
+- Trigger functions have EXECUTE revoked from PUBLIC.
 - Required RPC functions and extensions exist.
 - Database backups and monitoring are enabled.
 
@@ -510,33 +668,62 @@ Recommended verification sequence:
 - Data deletion and retention behavior are documented.
 - Provider costs, request limits, and upload limits are enforced.
 
-## 14. Known limitations
+## 15. Known limitations
 
-- There is no automated test suite in the current package scripts.
-- Several UI screens are demonstrations rather than complete persistent workflows.
+- Several UI screens use demo records alongside database-backed data.
 - The app's localStorage state is browser-specific and is not synchronized between devices.
-- The custom user table and Supabase Auth user list can diverge.
-- The current RLS design includes broad authenticated access on multiple tables.
-- OAuth is not yet equivalent to the email/password session flow.
-- Storage privacy settings and policies are inconsistent.
-- Some RAG database dependencies are assumed rather than created by repository migrations.
+- The custom user table and Supabase Auth user list can diverge if users are managed directly in Supabase.
+- OAuth imports users into the custom users table but does not establish a Supabase Auth session.
+- Rate limiting is not yet implemented.
+- Upload size enforcement is in edge function code, not at the storage policy level.
+- Single-row settings tables are not enforced by a database constraint.
 
-## 15. Recommended next implementation phase
+## 16. Migration history
 
-The next phase should focus on security and persistence rather than adding more screens:
+### Early migrations (2026-08-24 to 2026-08-28)
 
-1. Define the ownership and administrator model.
-2. Add server-enforced authorization for every sensitive operation.
-3. Protect or remove raw secret columns from browser-readable tables.
-4. Make private storage truly private.
-5. Connect the highest-value screens to durable database operations.
-6. Add durable audit events.
-7. Add integration tests for sign-in, AI proxy authorization, search, uploads, RAG, and storage policies.
-8. Only then enable OAuth and production AI-provider workflows.
+- Document folders, AI connections, API keys, AI usage function
+- Users, automations, OAuth2 columns, documents table and storage
+- Role permissions, automation runs, search settings and logs
+- AI knowledge tables, RLS policy fixes
 
-## 16. Glossary
+### Security hardening (2026-09-10)
+
+- Harden authenticated data access
+- Add OAuth state storage
+- Restrict usage function execution
+- Remove browser API key select
+- Create RBAC infrastructure (app_roles, manager_relationships, helper functions)
+- Add ownership audit columns to all tables
+- Backfill ownership and enforce NOT NULL
+- RBAC policies on all tables
+- Add ownership triggers (set_ownership_on_insert, set_updated_at, set_updated_by_on_update)
+- Restrict helper function execution
+- Create audit logs table
+- Add audit triggers on all protected tables
+- Secure file storage (private buckets, file_metadata, file_access_log, storage_settings)
+- Fix retention function search path
+- Add RAG functions (rag_search, rag_health_check)
+
+### Bug fixes during testing (2026-09-10)
+
+- Fix audit trigger for tables without `id` column
+- Fix audit trigger JSON cast
+- Fix set_ownership trigger for tables missing `updated_by_user_id`
+- Add missing `updated_by_user_id` column to automation_runs, knowledge_chunks, search_logs
+
+### Security hardening fixes (2026-09-10)
+
+- Revoke anon grants on 6 protected tables
+- Fix weak WITH CHECK on 7 UPDATE policies
+- Add RLS policies for oauth_states
+- Revoke EXECUTE on 14 functions from anon/PUBLIC
+- Replace FOR ALL policies with per-verb policies on app_roles and manager_relationships
+
+## 17. Glossary
 
 - **RLS:** Row Level Security; database rules that decide which rows a user can read or change.
+- **RBAC:** Role-Based Access Control; the system of roles, permissions, and ownership checks.
 - **JWT:** A signed session token used to prove a caller is authenticated.
 - **Edge Function:** A server-side function hosted by Supabase.
 - **RAG:** Retrieval-Augmented Generation; supplying relevant private documents to an AI prompt before generating an answer.
@@ -544,3 +731,6 @@ The next phase should focus on security and persistence rather than adding more 
 - **pgvector:** PostgreSQL extension for storing and comparing vector embeddings.
 - **Service role:** A highly privileged Supabase server credential that must never reach browser code.
 - **SSRF:** Server-Side Request Forgery; a weakness where an attacker causes a server to request an unintended internal or private URL.
+- **SECURITY DEFINER:** A PostgreSQL function attribute that causes the function to run with the privileges of the function owner rather than the caller.
+- **CSRF:** Cross-Site Request Forgery; an attack where a third-party site tricks a user's browser into making unwanted requests.
+- **Signed URL:** A time-limited URL that grants temporary access to a private storage object.
