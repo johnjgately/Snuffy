@@ -1,5 +1,5 @@
 import { Card, SectionHeader, Badge } from '@/components/ui';
-import { Mail, Award, Shield, Code, Cpu, GraduationCap, Trophy, Zap, Target, Lock, ScrollText, Workflow } from 'lucide-react';
+import { Mail, Shield, Code, Cpu, GraduationCap, Trophy, Zap, Target, Lock, ScrollText, Workflow, Building2, Library } from 'lucide-react';
 
 const credentials = [
   { icon: Shield, label: 'Master Sergeant', detail: 'Texas State Guard' },
@@ -17,9 +17,11 @@ const expertise = [
 
 const snuffyPillars = [
   { icon: Cpu, title: 'Unified AI', desc: 'Cloud and local model integration with cost monitoring.' },
+  { icon: Library, title: 'Knowledge & RAG', desc: 'Local document processing with vector search and cited sources.' },
   { icon: ScrollText, title: 'Full Audit Trail', desc: 'Every action logged, approved, and accountable.' },
   { icon: Workflow, title: 'Workflow Automation', desc: 'Scheduled reports, data monitoring, and AI tasks.' },
-  { icon: Lock, title: 'Security First', desc: 'Emergency stop, role-based access, and privacy modes.' },
+  { icon: Building2, title: 'Multi-Tenant', desc: 'Organizations, memberships, and typed ownership for team isolation.' },
+  { icon: Lock, title: 'Security First', desc: 'Emergency stop, role-based access, privacy modes, and deny-by-default.' },
 ];
 
 export function About() {
@@ -93,9 +95,9 @@ export function About() {
           <h3 className="text-base font-semibold">About Snuffy</h3>
         </div>
         <p className="text-sm text-ink-secondary leading-relaxed mb-5">
-          John created Snuffy, a secure, AI-powered operations assistant that brings document management, database access, workflow automation, and governance into one unified workspace. It gives teams the ability to work through chat, voice, or a traditional interface while keeping every action logged, approved, and accountable.
+          John created Snuffy, a secure, AI-powered operations assistant that brings document management, database access, workflow automation, and governance into one unified workspace. It supports multi-tenant ownership with organizations and memberships, local knowledge retrieval with vector search, and internet search with cited sources. Teams can work through chat, voice, or a traditional interface while every action is logged, approved, and accountable.
         </p>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {snuffyPillars.map((p) => {
             const Icon = p.icon;
             return (
