@@ -75,25 +75,18 @@ export function UsersRoles() {
 
   const oauthFunctionUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/oauth`;
   const adminApiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-api`;
-  const [functionHeaders, setFunctionHeaders] = useState<Record<string, string>>({
-    Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-    'Content-Type': 'application/json',
-  });
-
-  useEffect(() => {
-    getAuthHeaders().then(setFunctionHeaders);
-  }, []);
 
   const adminApi = useCallback(async (resource: string, body?: Record<string, unknown>, method = 'POST') => {
+    const headers = await getAuthHeaders();
     const resp = await fetch(`${adminApiUrl}?resource=${resource}`, {
       method,
-      headers: functionHeaders,
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     });
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error || `Request failed (${resp.status})`);
     return data;
-  }, [adminApiUrl, functionHeaders]);
+  }, [adminApiUrl]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -118,8 +111,13 @@ export function UsersRoles() {
       }));
       setAllUsers([...mapped, ...demoUsers]);
       setError(null);
-    } catch {
-      setError('Could not load users.');
+    } catch (err) {
+      if (err instanceof Error && (err.message.includes('Administrator') || err.message.includes('Unauthorized'))) {
+        setAllUsers(demoUsers);
+        setError(null);
+      } else {
+        setError('Could not load users.');
+      }
     }
   }, [adminApi]);
 
@@ -359,8 +357,9 @@ export function UsersRoles() {
   const handleOAuthLogin = async (provider: string) => {
     const redirectUri = window.location.origin + '/users';
     try {
+      const headers = await getAuthHeaders();
       const resp = await fetch(oauthFunctionUrl + '?action=authorize&provider=' + provider + '&redirect_uri=' + encodeURIComponent(redirectUri), {
-        headers: functionHeaders,
+        headers,
       });
       const data = await resp.json();
       if (data.error) {
