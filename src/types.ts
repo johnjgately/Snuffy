@@ -18,7 +18,11 @@ export type SectionId =
   | 'ai-knowledge-bases'
   | 'ai-knowledge-docs'
   | 'ai-training-settings'
-  | 'storage-review';
+  | 'storage-review'
+  | 'emergency-stop'
+  | 'authorization-matrix'
+  | 'local-ai-connectors'
+  | 'data-governance';
 
 export type PrivacyMode = 'local' | 'connected' | 'custom';
 

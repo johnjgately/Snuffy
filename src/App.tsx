@@ -28,6 +28,10 @@ import { AITrainingDashboard } from '@/sections/AITrainingDashboard';
 import { AIKnowledgeBases } from '@/sections/AIKnowledgeBases';
 import { AIKnowledgeDocs } from '@/sections/AIKnowledgeDocs';
 import { AITrainingSettings } from '@/sections/AITrainingSettings';
+import { EmergencyStop } from '@/sections/EmergencyStop';
+import { AuthorizationMatrix } from '@/sections/AuthorizationMatrix';
+import { LocalAIConnectors } from '@/sections/LocalAIConnectors';
+import { DataGovernance } from '@/sections/DataGovernance';
 
 function Shell() {
   const { emergencyStop, clearEmergencyStop, auth } = useApp();
@@ -57,6 +61,10 @@ function Shell() {
       case 'ai-knowledge-bases': return <AIKnowledgeBases />;
       case 'ai-knowledge-docs': return <AIKnowledgeDocs />;
       case 'ai-training-settings': return <AITrainingSettings />;
+      case 'emergency-stop': return <EmergencyStop />;
+      case 'authorization-matrix': return <AuthorizationMatrix />;
+      case 'local-ai-connectors': return <LocalAIConnectors />;
+      case 'data-governance': return <DataGovernance />;
       default: return <Dashboard onNavigate={setActive} />;
     }
   };

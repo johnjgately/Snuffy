@@ -20,6 +20,10 @@ import {
   Library,
   FolderSearch,
   Settings2,
+  OctagonAlert,
+  Grid3x3,
+  Network,
+  Scale,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -49,6 +53,10 @@ export const navItems: NavItem[] = [
   { id: 'feature-flags', label: 'Feature Flags', icon: Flag, group: 'Governance' },
   { id: 'integrations', label: 'Integrations', icon: Plug, group: 'Governance' },
   { id: 'security-settings', label: 'Security & Settings', icon: ShieldCheck, group: 'Governance' },
+  { id: 'emergency-stop', label: 'Emergency Stop', icon: OctagonAlert, group: 'Governance' },
+  { id: 'authorization-matrix', label: 'Authorization Matrix', icon: Grid3x3, group: 'Governance' },
+  { id: 'local-ai-connectors', label: 'Local AI Connectors', icon: Network, group: 'Governance' },
+  { id: 'data-governance', label: 'Data Governance', icon: Scale, group: 'Governance' },
   { id: 'help', label: 'Help & Guide', icon: HelpCircle, group: 'Support' },
   { id: 'about', label: 'About', icon: Info, group: 'Support' },
 ];

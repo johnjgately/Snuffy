@@ -85,12 +85,18 @@ Deno.serve(async (req: Request) => {
         .maybeSingle();
       const { data: userRow } = await supabase
         .from("users")
-        .select("must_reset_password")
+        .select("must_reset_password, email_verified, mfa_enabled, mfa_required, disabled, locked_until")
         .eq("auth_user_id", user.id)
         .maybeSingle();
+      const isLocked = userRow?.locked_until && new Date(userRow.locked_until) > new Date();
       return jsonResponse({
         role: roleRow?.role ?? "standard_user",
         must_reset_password: userRow?.must_reset_password ?? false,
+        email_verified: userRow?.email_verified ?? false,
+        mfa_enabled: userRow?.mfa_enabled ?? false,
+        mfa_required: userRow?.mfa_required ?? false,
+        disabled: userRow?.disabled ?? false,
+        locked: isLocked ?? false,
       });
     }
 
@@ -211,6 +217,83 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ logs: data ?? [] });
       }
 
+      if (resource === "emergency-stop") {
+        const { data, error } = await supabase
+          .from("emergency_stop_switches")
+          .select("id, service, label, is_stopped, stopped_by, stopped_at, reason, restored_by, restored_at, restored_reason, updated_at")
+          .order("service");
+        if (error) return jsonResponse({ error: "Could not load emergency stop switches." }, 500);
+        const { data: history } = await supabase
+          .from("emergency_stop_history")
+          .select("id, service, action, actor_user_id, reason, occurred_at, metadata")
+          .order("occurred_at", { ascending: false })
+          .limit(100);
+        return jsonResponse({ switches: data ?? [], history: history ?? [] });
+      }
+
+      if (resource === "markets") {
+        const { data, error } = await supabase
+          .from("markets")
+          .select("id, name, slug, description, status, owner_user_id, created_at, updated_at")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load markets." }, 500);
+        return jsonResponse({ markets: data ?? [] });
+      }
+
+      if (resource === "connectors") {
+        const { data, error } = await supabase
+          .from("local_ai_connectors")
+          .select("id, name, description, organization_id, market_id, allowlisted_endpoints, health_status, health_checked_at, health_error, owner_user_id, approved, approved_by, approved_at, created_at, updated_at, review_date")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load connectors." }, 500);
+        return jsonResponse({ connectors: data ?? [] });
+      }
+
+      if (resource === "legal-holds") {
+        const { data, error } = await supabase
+          .from("legal_holds")
+          .select("id, entity_type, entity_id, reason, placed_by, placed_at, released_at, released_by, release_reason, metadata")
+          .order("placed_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load legal holds." }, 500);
+        return jsonResponse({ holds: data ?? [] });
+      }
+
+      if (resource === "export-requests") {
+        const { data, error } = await supabase
+          .from("export_requests")
+          .select("id, requested_by, scope, entity_type, entity_ids, status, download_url_expires_at, file_size_bytes, created_at, completed_at, metadata")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load export requests." }, 500);
+        return jsonResponse({ exports: data ?? [] });
+      }
+
+      if (resource === "cross-market-transfers") {
+        const { data, error } = await supabase
+          .from("cross_market_transfers")
+          .select("id, entity_type, entity_id, from_organization_id, to_organization_id, from_market_id, to_market_id, from_owner_user_id, to_owner_user_id, requested_by, reason, status, approved_by, approved_at, approval_reason, created_at, completed_at")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load transfers." }, 500);
+        return jsonResponse({ transfers: data ?? [] });
+      }
+
+      if (resource === "data-classifications") {
+        const { data, error } = await supabase
+          .from("data_classifications")
+          .select("id, level, label, description, retention_days, created_at")
+          .order("retention_days");
+        if (error) return jsonResponse({ error: "Could not load classifications." }, 500);
+        return jsonResponse({ classifications: data ?? [] });
+      }
+
+      if (resource === "retention-policies") {
+        const { data, error } = await supabase
+          .from("retention_policies")
+          .select("id, entity_type, organization_id, market_id, retention_days, created_at, updated_at")
+          .order("entity_type");
+        if (error) return jsonResponse({ error: "Could not load retention policies." }, 500);
+        return jsonResponse({ policies: data ?? [] });
+      }
+
       if (resource === "storage-review") {
         // Get bucket posture from storage.buckets
         const { data: buckets } = await supabase
@@ -263,6 +346,7 @@ Deno.serve(async (req: Request) => {
           owner_user_id: user.id,
           created_by_user_id: user.id,
           updated_by_user_id: user.id,
+          created_by_admin_user_id: user.id,
         };
         const tempPassword = typeof body.password === "string" ? body.password : "";
         if (tempPassword) {
@@ -276,6 +360,7 @@ Deno.serve(async (req: Request) => {
           row.auth_user_id = authData.user.id;
           row.must_reset_password = true;
           row.status = "active";
+          row.initial_password_changed = false;
         }
         const { data, error: insertError } = await supabase.from("users").insert(row).select("id").single();
         if (insertError) {
@@ -463,9 +548,180 @@ Deno.serve(async (req: Request) => {
 
       if (resource === "user-disable") {
         if (!body.id) return jsonResponse({ error: "User ID is required." }, 400);
-        const { error } = await supabase.from("users").update({ status: "suspended", updated_by_user_id: user.id }).eq("id", body.id);
+        const { data: userRow } = await supabase.from("users").select("auth_user_id").eq("id", body.id).maybeSingle();
+        const reason = typeof body.reason === "string" ? body.reason.slice(0, 500) : "Admin action";
+        const { error } = await supabase.from("users").update({
+          status: "suspended", disabled: true, disabled_at: new Date().toISOString(),
+          disabled_by_user_id: user.id, disabled_reason: reason, updated_by_user_id: user.id,
+        }).eq("id", body.id);
         if (error) return jsonResponse({ error: "Could not disable user." }, 500);
-        await logAudit(supabase, { actor_user_id: user.id, action: "user.disable", entity_type: "users", entity_id: body.id });
+        if (userRow?.auth_user_id) {
+          await supabase.rpc("revoke_user_sessions", { p_user_id: userRow.auth_user_id, p_reason: "disabled" });
+        }
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.disable", entity_type: "users", entity_id: body.id, metadata: { reason } });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "user-enable") {
+        if (!body.id) return jsonResponse({ error: "User ID is required." }, 400);
+        const { error } = await supabase.from("users").update({
+          status: "active", disabled: false, disabled_at: null, disabled_by_user_id: null, disabled_reason: null,
+          locked_until: null, updated_by_user_id: user.id,
+        }).eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not enable user." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.enable", entity_type: "users", entity_id: body.id });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "revoke-user-sessions") {
+        if (!body.user_id) return jsonResponse({ error: "User ID is required." }, 400);
+        await supabase.rpc("revoke_user_sessions", { p_user_id: body.user_id, p_reason: "admin" });
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.revoke_sessions", entity_type: "auth", entity_id: body.user_id });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "emergency-stop-toggle") {
+        if (!body.service) return jsonResponse({ error: "Service is required." }, 400);
+        if (!body.reason || typeof body.reason !== "string" || body.reason.trim().length === 0) {
+          return jsonResponse({ error: "A reason is required to activate or restore emergency stop." }, 400);
+        }
+        const { data: sw } = await supabase.from("emergency_stop_switches").select("*").eq("service", body.service).maybeSingle();
+        if (!sw) return jsonResponse({ error: "Unknown service switch." }, 404);
+        const activate = body.activate !== false;
+        if (activate) {
+          await supabase.from("emergency_stop_switches").update({
+            is_stopped: true, stopped_by: user.id, stopped_at: new Date().toISOString(),
+            reason: body.reason, restored_by: null, restored_at: null, restored_reason: null,
+            updated_at: new Date().toISOString(),
+          }).eq("id", sw.id);
+        } else {
+          await supabase.from("emergency_stop_switches").update({
+            is_stopped: false, restored_by: user.id, restored_at: new Date().toISOString(),
+            restored_reason: body.reason, updated_at: new Date().toISOString(),
+          }).eq("id", sw.id);
+        }
+        await supabase.from("emergency_stop_history").insert({
+          service: body.service, action: activate ? "activate" : "restore",
+          actor_user_id: user.id, reason: body.reason, occurred_at: new Date().toISOString(),
+        });
+        await logAudit(supabase, { actor_user_id: user.id, action: activate ? "emergency_stop.activate" : "emergency_stop.restore", entity_type: "emergency_stop", entity_id: body.service, metadata: { reason: body.reason } });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "market-create") {
+        if (!body.name || !body.slug) return jsonResponse({ error: "Name and slug are required." }, 400);
+        const { data, error } = await supabase.from("markets").insert({
+          name: String(body.name).slice(0, 200),
+          slug: String(body.slug).slice(0, 100).toLowerCase().replace(/[^a-z0-9-]/g, "-"),
+          description: typeof body.description === "string" ? body.description.slice(0, 500) : null,
+          status: "active", owner_user_id: user.id, created_by_user_id: user.id, updated_by_user_id: user.id,
+        }).select("id").single();
+        if (error) return jsonResponse({ error: "Could not create market." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "market.create", entity_type: "markets", entity_id: data.id });
+        return jsonResponse({ id: data.id });
+      }
+
+      if (resource === "connector-create") {
+        if (!body.name || !Array.isArray(body.endpoints)) return jsonResponse({ error: "Name and endpoints array are required." }, 400);
+        const { data, error } = await supabase.from("local_ai_connectors").insert({
+          name: String(body.name).slice(0, 200),
+          description: typeof body.description === "string" ? body.description.slice(0, 500) : null,
+          organization_id: body.organization_id ?? null,
+          market_id: body.market_id ?? null,
+          allowlisted_endpoints: body.endpoints,
+          owner_user_id: user.id, created_by_user_id: user.id, updated_by_user_id: user.id,
+          approved: false, review_date: body.review_date ?? null,
+        }).select("id").single();
+        if (error) return jsonResponse({ error: "Could not create connector." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "connector.create", entity_type: "local_ai_connectors", entity_id: data.id, metadata: { name: body.name } });
+        return jsonResponse({ id: data.id });
+      }
+
+      if (resource === "connector-approve") {
+        if (!body.id) return jsonResponse({ error: "Connector ID is required." }, 400);
+        const { error } = await supabase.from("local_ai_connectors").update({
+          approved: true, approved_by: user.id, approved_at: new Date().toISOString(),
+        }).eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not approve connector." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "connector.approve", entity_type: "local_ai_connectors", entity_id: body.id });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "connector-delete") {
+        if (!body.id) return jsonResponse({ error: "Connector ID is required." }, 400);
+        const { error } = await supabase.from("local_ai_connectors").delete().eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not delete connector." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "connector.delete", entity_type: "local_ai_connectors", entity_id: body.id });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "legal-hold-place") {
+        if (!body.entity_type || !body.entity_id || !body.reason) return jsonResponse({ error: "Entity type, entity ID, and reason are required." }, 400);
+        const { data, error } = await supabase.from("legal_holds").insert({
+          entity_type: String(body.entity_type).slice(0, 100), entity_id: body.entity_id,
+          reason: String(body.reason).slice(0, 500), placed_by: user.id,
+        }).select("id").single();
+        if (error) return jsonResponse({ error: "Could not place legal hold." }, 500);
+        if (body.entity_type === "documents") {
+          await supabase.from("documents").update({ legal_hold: true, legal_hold_reason: body.reason, legal_hold_at: new Date().toISOString(), legal_hold_by: user.id }).eq("id", body.entity_id);
+        } else if (body.entity_type === "knowledge_documents") {
+          await supabase.from("knowledge_documents").update({ legal_hold: true, legal_hold_reason: body.reason, legal_hold_at: new Date().toISOString(), legal_hold_by: user.id }).eq("id", body.entity_id);
+        }
+        await logAudit(supabase, { actor_user_id: user.id, action: "legal_hold.place", entity_type: body.entity_type, entity_id: body.entity_id, metadata: { reason: body.reason } });
+        return jsonResponse({ id: data.id });
+      }
+
+      if (resource === "legal-hold-release") {
+        if (!body.id) return jsonResponse({ error: "Hold ID is required." }, 400);
+        const { data: hold } = await supabase.from("legal_holds").select("entity_type, entity_id").eq("id", body.id).maybeSingle();
+        if (!hold) return jsonResponse({ error: "Hold not found." }, 404);
+        const releaseReason = typeof body.reason === "string" ? body.reason.slice(0, 500) : "Released";
+        const { error } = await supabase.from("legal_holds").update({
+          released_at: new Date().toISOString(), released_by: user.id, release_reason: releaseReason,
+        }).eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not release legal hold." }, 500);
+        if (hold.entity_type === "documents") {
+          await supabase.from("documents").update({ legal_hold: false, legal_hold_reason: null, legal_hold_at: null, legal_hold_by: null }).eq("id", hold.entity_id);
+        } else if (hold.entity_type === "knowledge_documents") {
+          await supabase.from("knowledge_documents").update({ legal_hold: false, legal_hold_reason: null, legal_hold_at: null, legal_hold_by: null }).eq("id", hold.entity_id);
+        }
+        await logAudit(supabase, { actor_user_id: user.id, action: "legal_hold.release", entity_type: hold.entity_type, entity_id: hold.entity_id, metadata: { reason: releaseReason } });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "cross-market-transfer-approve") {
+        if (!body.id) return jsonResponse({ error: "Transfer ID is required." }, 400);
+        const { data: transfer } = await supabase.from("cross_market_transfers").select("*").eq("id", body.id).maybeSingle();
+        if (!transfer) return jsonResponse({ error: "Transfer not found." }, 404);
+        const { error } = await supabase.from("cross_market_transfers").update({
+          status: "approved", approved_by: user.id, approved_at: new Date().toISOString(),
+          approval_reason: typeof body.reason === "string" ? body.reason.slice(0, 500) : "",
+        }).eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not approve transfer." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "cross_market_transfer.approve", entity_type: "cross_market_transfers", entity_id: body.id });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "retention-policy-set") {
+        if (!body.entity_type || typeof body.retention_days !== "number") return jsonResponse({ error: "Entity type and retention days are required." }, 400);
+        const { error } = await supabase.from("retention_policies").upsert({
+          entity_type: String(body.entity_type).slice(0, 100),
+          organization_id: body.organization_id ?? null,
+          market_id: body.market_id ?? null,
+          retention_days: Math.min(Math.max(body.retention_days, 1), 36500),
+        }, { onConflict: "entity_type,organization_id,market_id" });
+        if (error) return jsonResponse({ error: "Could not set retention policy." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "retention_policy.set", entity_type: "retention_policies", metadata: { entity_type: body.entity_type, retention_days: body.retention_days } });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "org-mfa-required") {
+        if (!body.organization_id) return jsonResponse({ error: "Organization ID is required." }, 400);
+        const { error } = await supabase.from("organizations").update({
+          mfa_required: Boolean(body.mfa_required), updated_by_user_id: user.id, updated_at: new Date().toISOString(),
+        }).eq("id", body.organization_id);
+        if (error) return jsonResponse({ error: "Could not update MFA policy." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "org.mfa_policy", entity_type: "organizations", entity_id: body.organization_id, metadata: { mfa_required: body.mfa_required } });
         return jsonResponse({ ok: true });
       }
 

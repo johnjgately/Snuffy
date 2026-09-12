@@ -112,7 +112,7 @@ export function About() {
       </Card>
 
       {/* Contact */}
-      <Card className="p-5">
+      <Card className="p-5 mb-6">
         <p className="label-mono mb-3">Contact</p>
         <a
           href="mailto:johnjgately@gmail.com"
@@ -126,6 +126,53 @@ export function About() {
             <p className="text-xs text-ink-muted mt-0.5">Click to send an email</p>
           </div>
         </a>
+      </Card>
+
+      {/* Release Metadata */}
+      <Card className="p-5">
+        <p className="label-mono mb-3">Release Metadata</p>
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between py-1.5 border-b border-bg-border">
+            <span className="text-ink-muted">Application Version</span>
+            <span className="font-mono text-ink-secondary">2.0.0</span>
+          </div>
+          <div className="flex justify-between py-1.5 border-b border-bg-border">
+            <span className="text-ink-muted">Repository Commit</span>
+            <span className="font-mono text-ink-secondary">security-hardening-v2</span>
+          </div>
+          <div className="flex justify-between py-1.5 border-b border-bg-border">
+            <span className="text-ink-muted">Migration Range</span>
+            <span className="font-mono text-ink-secondary text-right">20260824210621 – 20260912206000</span>
+          </div>
+          <div className="flex justify-between py-1.5 border-b border-bg-border">
+            <span className="text-ink-muted">Environment</span>
+            <span className="font-mono text-ink-secondary">Production</span>
+          </div>
+          <div className="flex justify-between py-1.5 border-b border-bg-border">
+            <span className="text-ink-muted">Deployment Date</span>
+            <span className="font-mono text-ink-secondary">2026-09-12</span>
+          </div>
+          <div className="flex justify-between py-1.5">
+            <span className="text-ink-muted">Last Review Date</span>
+            <span className="font-mono text-ink-secondary">2026-09-12</span>
+          </div>
+        </div>
+        <div className="mt-4 pt-3 border-t border-bg-border">
+          <p className="label-mono mb-2 text-[10px]">Migration Identifiers</p>
+          <div className="space-y-1">
+            {[
+              '20260912200000 — Markets & multi-tenant market_id',
+              '20260912201000 — Account security (MFA, sessions, lockout)',
+              '20260912202000 — Emergency stop system',
+              '20260912203000 — Local AI connectors (SSRF prevention)',
+              '20260912204000 — Automation reliability',
+              '20260912205000 — Document security & data governance',
+              '20260912206000 — API security & cross-market transfers',
+            ].map((m) => (
+              <p key={m} className="text-[10px] font-mono text-ink-faint">{m}</p>
+            ))}
+          </div>
+        </div>
       </Card>
     </div>
   );

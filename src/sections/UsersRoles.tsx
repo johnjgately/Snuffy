@@ -271,7 +271,7 @@ export function UsersRoles() {
   // Edit user
   const openEdit = (u: User) => {
     setEditingUser(u);
-    setEditForm({ name: u.name, email: u.email, role: u.role, status: u.status, mfa: u.mfa });
+    setEditForm({ name: u.name, email: u.email, role: u.role, status: u.status, mfa: u.mfa, password: '', confirmPassword: '' });
   };
 
   const handleEditSave = async () => {

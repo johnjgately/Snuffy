@@ -9,11 +9,23 @@ interface AuthState {
   session: Session | null;
   loading: boolean;
   mustResetPassword: boolean;
-  signIn: (email: string, password: string) => Promise<{ error: string | null }>;
+  emailVerified: boolean;
+  mfaEnabled: boolean;
+  mfaRequired: boolean;
+  disabled: boolean;
+  locked: boolean;
+  signIn: (email: string, password: string) => Promise<{ error: string | null; locked?: boolean }>;
   signUp: (email: string, password: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
   resetPassword: (newPassword: string) => Promise<{ error: string | null }>;
   clearMustReset: () => void;
+  requestPasswordReset: (email: string) => Promise<{ error: string | null; token?: string }>;
+  confirmPasswordReset: (token: string, newPassword: string) => Promise<{ error: string | null }>;
+  enrollMFA: () => Promise<{ error: string | null; secret?: string; otpauthUrl?: string }>;
+  verifyMFA: (code: string) => Promise<{ error: string | null }>;
+  disableMFA: () => Promise<{ error: string | null }>;
+  sendEmailVerification: () => Promise<{ error: string | null }>;
+  confirmEmailVerification: (token: string) => Promise<{ error: string | null }>;
 }
 
 interface AppState {
@@ -127,6 +139,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [mustResetPassword, setMustResetPassword] = useState(false);
+  const [emailVerified, setEmailVerified] = useState(false);
+  const [mfaEnabled, setMfaEnabled] = useState(false);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [disabled, setDisabled] = useState(false);
+  const [locked, setLocked] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -143,9 +160,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-api?resource=my-role`, { headers });
           const data = await resp.json();
           if (data.must_reset_password) setMustResetPassword(true);
+          if (typeof data.email_verified === 'boolean') setEmailVerified(data.email_verified);
+          if (typeof data.mfa_enabled === 'boolean') setMfaEnabled(data.mfa_enabled);
+          if (typeof data.mfa_required === 'boolean') setMfaRequired(data.mfa_required);
+          if (typeof data.disabled === 'boolean') setDisabled(data.disabled);
+          if (typeof data.locked === 'boolean') setLocked(data.locked);
         })();
       } else {
         setMustResetPassword(false);
+        setEmailVerified(false);
+        setMfaEnabled(false);
+        setMfaRequired(false);
+        setDisabled(false);
+        setLocked(false);
       }
     });
     return () => {
@@ -155,8 +182,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    return { error: error ? error.message : null };
+    const authApiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api`;
+    // Check lockout status first
+    try {
+      const lockResp = await fetch(`${authApiUrl}?action=check-lockout&email=${encodeURIComponent(email)}`);
+      const lockData = await lockResp.json();
+      if (lockData.locked) {
+        return { error: 'This account is temporarily locked due to too many failed attempts. Please try again in 15 minutes.', locked: true };
+      }
+    } catch { /* proceed to sign in */ }
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+
+    // Log the attempt
+    try {
+      await fetch(`${authApiUrl}?action=login-attempt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, success: !error }),
+      });
+    } catch { /* logging is best-effort */ }
+
+    if (error) return { error: error.message };
+
+    // Check if account is disabled
+    try {
+      const statusResp = await fetch(`${authApiUrl}?action=check-account-status&email=${encodeURIComponent(email)}`);
+      const statusData = await statusResp.json();
+      if (statusData.status === 'disabled') {
+        await supabase.auth.signOut();
+        return { error: 'This account has been disabled. Please contact an administrator.' };
+      }
+    } catch { /* proceed */ }
+
+    return { error: null };
   }, []);
 
   const signUp = useCallback(async (email: string, password: string) => {
@@ -167,6 +226,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
     setMustResetPassword(false);
+    setEmailVerified(false);
+    setMfaEnabled(false);
+    setMfaRequired(false);
+    setDisabled(false);
+    setLocked(false);
   }, []);
 
   const resetPassword = useCallback(async (newPassword: string) => {
@@ -187,6 +251,115 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const clearMustReset = useCallback(() => setMustResetPassword(false), []);
+
+  const requestPasswordReset = useCallback(async (email: string) => {
+    try {
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api?action=password-reset-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await resp.json();
+      if (data.error) return { error: data.error };
+      return { error: null, token: data.reset_token };
+    } catch {
+      return { error: 'Could not request password reset.' };
+    }
+  }, []);
+
+  const confirmPasswordReset = useCallback(async (token: string, newPassword: string) => {
+    try {
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api?action=password-reset-confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, new_password: newPassword }),
+      });
+      const data = await resp.json();
+      if (data.error) return { error: data.error };
+      return { error: null };
+    } catch {
+      return { error: 'Could not reset password.' };
+    }
+  }, []);
+
+  const enrollMFA = useCallback(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api?action=mfa-enroll`, {
+        method: 'POST',
+        headers,
+      });
+      const data = await resp.json();
+      if (data.error) return { error: data.error };
+      return { error: null, secret: data.secret, otpauthUrl: data.otpauth_url };
+    } catch {
+      return { error: 'Could not enroll in MFA.' };
+    }
+  }, []);
+
+  const verifyMFA = useCallback(async (code: string) => {
+    try {
+      const headers = await getAuthHeaders();
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api?action=mfa-verify`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ code }),
+      });
+      const data = await resp.json();
+      if (data.error) return { error: data.error };
+      setMfaEnabled(true);
+      return { error: null };
+    } catch {
+      return { error: 'Could not verify MFA code.' };
+    }
+  }, []);
+
+  const disableMFA = useCallback(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api?action=mfa-disable`, {
+        method: 'POST',
+        headers,
+      });
+      const data = await resp.json();
+      if (data.error) return { error: data.error };
+      setMfaEnabled(false);
+      return { error: null };
+    } catch {
+      return { error: 'Could not disable MFA.' };
+    }
+  }, []);
+
+  const sendEmailVerification = useCallback(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api?action=email-verification-send`, {
+        method: 'POST',
+        headers,
+      });
+      const data = await resp.json();
+      if (data.error) return { error: data.error };
+      return { error: null };
+    } catch {
+      return { error: 'Could not send verification email.' };
+    }
+  }, []);
+
+  const confirmEmailVerification = useCallback(async (token: string) => {
+    try {
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api?action=email-verification-confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      const data = await resp.json();
+      if (data.error) return { error: data.error };
+      setEmailVerified(true);
+      return { error: null };
+    } catch {
+      return { error: 'Could not verify email.' };
+    }
+  }, []);
 
   useEffect(() => {
     const data: Persisted = { privacyMode, customToggles, voice, branding, searchSettings, demoMode, auditCount };
@@ -226,7 +399,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value: AppState = {
-    auth: { session, loading: authLoading, mustResetPassword, signIn, signUp, signOut, resetPassword, clearMustReset },
+    auth: { session, loading: authLoading, mustResetPassword, emailVerified, mfaEnabled, mfaRequired, disabled, locked, signIn, signUp, signOut, resetPassword, clearMustReset, requestPasswordReset, confirmPasswordReset, enrollMFA, verifyMFA, disableMFA, sendEmailVerification, confirmEmailVerification },
     privacyMode,
     setPrivacyMode,
     customToggles,
