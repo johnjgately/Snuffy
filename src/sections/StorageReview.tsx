@@ -76,21 +76,16 @@ export function StorageReview() {
   const [settings, setSettings] = useState<StorageSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [headers, setHeaders] = useState<Record<string, string>>({
-    Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-    'Content-Type': 'application/json',
-  });
 
   const [filterBucket, setFilterBucket] = useState('');
   const [filterOwner, setFilterOwner] = useState('');
   const [filterRetention, setFilterRetention] = useState('');
 
-  useEffect(() => { getAuthHeaders().then(setHeaders); }, []);
-
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
+      const headers = await getAuthHeaders();
       const resp = await fetch(`${adminApiUrl}?resource=storage-review`, { method: 'GET', headers });
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || `Request failed (${resp.status})`);
@@ -102,12 +97,11 @@ export function StorageReview() {
     } finally {
       setLoading(false);
     }
-  }, [headers]);
+  }, []);
 
   useEffect(() => {
-    if (headers.Authorization?.includes('anon')) return;
     loadData();
-  }, [headers, loadData]);
+  }, [loadData]);
 
   const filteredFiles = files.filter((f) => {
     if (filterBucket && f.bucket_id !== filterBucket) return false;
