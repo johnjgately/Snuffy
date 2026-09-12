@@ -38,7 +38,7 @@ const oauthProviders = [
   { value: 'azure', label: 'Microsoft', authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token', userinfoUrl: 'https://graph.microsoft.com/oidc/userinfo' },
 ];
 
-const emptyUserForm = { name: '', email: '', role: 'Viewer' as string, status: 'invited' as string, mfa: false };
+const emptyUserForm = { name: '', email: '', role: 'Viewer' as string, status: 'invited' as string, mfa: false, password: '', confirmPassword: '' };
 const emptyOAuthConfig = { provider: 'google', clientId: '', clientSecret: '' };
 
 function initials(name: string): string {
@@ -210,10 +210,18 @@ export function UsersRoles() {
       setError('Name and email are required.');
       return;
     }
+    if (!userForm.password || userForm.password.length < 8) {
+      setError('Temporary password must be at least 8 characters.');
+      return;
+    }
+    if (userForm.password !== userForm.confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      const data = await adminApi('users', { name: userForm.name.trim(), email: userForm.email.trim(), role: userForm.role, status: userForm.status, mfa: userForm.mfa, permissions: [] });
+      const data = await adminApi('users', { name: userForm.name.trim(), email: userForm.email.trim(), role: userForm.role, status: userForm.status, mfa: userForm.mfa, permissions: [], password: userForm.password });
       const newUser: User = {
         id: data.id,
         name: userForm.name.trim(),
@@ -549,13 +557,18 @@ export function UsersRoles() {
       {/* Add User modal */}
       <Modal open={showAdd} onClose={() => { setShowAdd(false); setUserForm(emptyUserForm); setError(null); }} title="Add User" titleId="add-user-title" maxWidth="max-w-md">
         <div className="p-5 space-y-4">
-          <p className="text-sm text-ink-secondary">Add a user directly to the platform. They'll have immediate access with the role and status you select.</p>
+          <p className="text-sm text-ink-secondary">Add a user directly to the platform. They'll be created with a temporary password and must set a new one on first login.</p>
           <label className="block"><span className="label-mono">Full name</span><Input className="mt-1" placeholder="Jane Doe" value={userForm.name} onChange={(e) => setUserForm((p) => ({ ...p, name: e.target.value }))} autoFocus /></label>
           <label className="block"><span className="label-mono">Email address</span><Input className="mt-1" type="email" placeholder="jane@company.com" value={userForm.email} onChange={(e) => setUserForm((p) => ({ ...p, email: e.target.value }))} /></label>
           <div className="grid grid-cols-2 gap-3">
             <label className="block"><span className="label-mono">Role</span><Select className="mt-1" value={userForm.role} onChange={(e) => setUserForm((p) => ({ ...p, role: e.target.value }))}>{roleOptions.map((r) => <option key={r} value={r}>{r}</option>)}</Select></label>
             <label className="block"><span className="label-mono">Status</span><Select className="mt-1" value={userForm.status} onChange={(e) => setUserForm((p) => ({ ...p, status: e.target.value }))}>{statusOptions.map((s) => <option key={s} value={s} className="capitalize">{s}</option>)}</Select></label>
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block"><span className="label-mono">Temporary password</span><Input className="mt-1" type="password" placeholder="Min 8 characters" value={userForm.password} onChange={(e) => setUserForm((p) => ({ ...p, password: e.target.value }))} /></label>
+            <label className="block"><span className="label-mono">Confirm password</span><Input className="mt-1" type="password" placeholder="Re-enter password" value={userForm.confirmPassword} onChange={(e) => setUserForm((p) => ({ ...p, confirmPassword: e.target.value }))} /></label>
+          </div>
+          <p className="text-xs text-ink-muted">The user will be required to create a new password the first time they sign in.</p>
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={userForm.mfa} onChange={(e) => setUserForm((p) => ({ ...p, mfa: e.target.checked }))} className="h-4 w-4 rounded border-bg-border" />
             <span className="text-sm text-ink-secondary">Require multi-factor authentication</span>

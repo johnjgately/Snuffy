@@ -3,14 +3,17 @@ import type { ReactNode } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import type { CustomToggle, PrivacyMode, VoiceSettings, SearchSettings } from '@/types';
 import { defaultCustomToggles, defaultVoiceSettings } from '@/data/demo';
-import { supabase } from '@/lib/supabase';
+import { supabase, getAuthHeaders } from '@/lib/supabase';
 
 interface AuthState {
   session: Session | null;
   loading: boolean;
+  mustResetPassword: boolean;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signUp: (email: string, password: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
+  resetPassword: (newPassword: string) => Promise<{ error: string | null }>;
+  clearMustReset: () => void;
 }
 
 interface AppState {
@@ -123,6 +126,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [mustResetPassword, setMustResetPassword] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -133,6 +137,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
       setSession(newSession);
+      if (newSession) {
+        (async () => {
+          const headers = await getAuthHeaders();
+          const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-api?resource=my-role`, { headers });
+          const data = await resp.json();
+          if (data.must_reset_password) setMustResetPassword(true);
+        })();
+      } else {
+        setMustResetPassword(false);
+      }
     });
     return () => {
       mounted = false;
@@ -152,7 +166,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
+    setMustResetPassword(false);
   }, []);
+
+  const resetPassword = useCallback(async (newPassword: string) => {
+    try {
+      const headers = await getAuthHeaders();
+      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-api?resource=reset-password`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ new_password: newPassword }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) return { error: data.error || 'Could not reset password.' };
+      setMustResetPassword(false);
+      return { error: null };
+    } catch {
+      return { error: 'Could not reset password. Please try again.' };
+    }
+  }, []);
+
+  const clearMustReset = useCallback(() => setMustResetPassword(false), []);
 
   useEffect(() => {
     const data: Persisted = { privacyMode, customToggles, voice, branding, searchSettings, demoMode, auditCount };
@@ -192,7 +226,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value: AppState = {
-    auth: { session, loading: authLoading, signIn, signUp, signOut },
+    auth: { session, loading: authLoading, mustResetPassword, signIn, signUp, signOut, resetPassword, clearMustReset },
     privacyMode,
     setPrivacyMode,
     customToggles,

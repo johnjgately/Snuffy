@@ -5,6 +5,8 @@ import { TopBar } from '@/components/TopBar';
 import { PrivacyModeModal } from '@/components/PrivacyModeModal';
 import { EmergencyOverlay } from '@/components/EmergencyOverlay';
 import { LandingPage } from '@/sections/LandingPage';
+import { Button, Input } from '@/components/ui';
+import { Lock, Eye, EyeOff, Loader2, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 import type { SectionId } from '@/types';
 import { Dashboard } from '@/sections/Dashboard';
 import { AIChat } from '@/sections/AIChat';
@@ -106,7 +108,117 @@ function Root() {
     return <LandingPage />;
   }
 
+  if (auth.mustResetPassword) {
+    return <PasswordResetScreen />;
+  }
+
   return <Shell />;
+}
+
+function PasswordResetScreen() {
+  const { auth } = useApp();
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [success, setSuccess] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (newPassword.length < 8) {
+      setError('Password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+    setSubmitting(true);
+    const { error } = await auth.resetPassword(newPassword);
+    setSubmitting(false);
+    if (error) {
+      setError(error);
+    } else {
+      setSuccess(true);
+      setTimeout(() => auth.clearMustReset(), 1500);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-bg-base px-4">
+      <div className="w-full max-w-md panel-elevated rounded-2xl shadow-panel p-6 lg:p-8">
+        <div className="flex items-center gap-2 mb-1">
+          <Lock className="h-4 w-4 text-accent" aria-hidden="true" />
+          <h2 className="text-lg font-semibold">Set a new password</h2>
+        </div>
+        <p className="text-sm text-ink-muted mb-6">
+          Your account was created with a temporary password. Please choose a new password to continue.
+        </p>
+
+        {success ? (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-success-soft/20 border border-success/30 animate-fade-in">
+            <CheckCircle2 className="h-4 w-4 text-success shrink-0 mt-0.5" aria-hidden="true" />
+            <p className="text-sm text-success">Password updated. Redirecting to your dashboard…</p>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <label className="block">
+              <span className="label-mono">New password</span>
+              <div className="relative mt-1">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-faint" aria-hidden="true" />
+                <Input
+                  type={showPassword ? 'text' : 'password'}
+                  className="pl-10 pr-10"
+                  placeholder="At least 8 characters"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  autoFocus
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((s) => !s)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink-secondary transition-colors"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </label>
+            <label className="block">
+              <span className="label-mono">Confirm new password</span>
+              <div className="relative mt-1">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-faint" aria-hidden="true" />
+                <Input
+                  type={showPassword ? 'text' : 'password'}
+                  className="pl-10"
+                  placeholder="Re-enter new password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  autoComplete="new-password"
+                />
+              </div>
+            </label>
+            {error && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-danger-soft/20 border border-danger/30 animate-fade-in">
+                <AlertCircle className="h-4 w-4 text-danger shrink-0 mt-0.5" aria-hidden="true" />
+                <p className="text-sm text-danger">{error}</p>
+              </div>
+            )}
+            <Button type="submit" variant="primary" className="w-full" disabled={submitting}>
+              {submitting ? (
+                <><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Updating…</>
+              ) : (
+                <>Set new password <ArrowRight className="h-4 w-4" aria-hidden="true" /></>
+              )}
+            </Button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function App() {

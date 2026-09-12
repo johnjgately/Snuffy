@@ -83,7 +83,36 @@ Deno.serve(async (req: Request) => {
         .select("role")
         .eq("user_id", user.id)
         .maybeSingle();
-      return jsonResponse({ role: roleRow?.role ?? "standard_user" });
+      const { data: userRow } = await supabase
+        .from("users")
+        .select("must_reset_password")
+        .eq("auth_user_id", user.id)
+        .maybeSingle();
+      return jsonResponse({
+        role: roleRow?.role ?? "standard_user",
+        must_reset_password: userRow?.must_reset_password ?? false,
+      });
+    }
+
+    if (resource === "reset-password") {
+      const user = await getUser(req, supabase);
+      if (!user) return jsonResponse({ error: "Unauthorized." }, 401);
+      const body = await req.json().catch(() => ({}));
+      const newPassword = typeof body.new_password === "string" ? body.new_password : "";
+      if (newPassword.length < 8) return jsonResponse({ error: "Password must be at least 8 characters." }, 400);
+      const { data: userRow } = await supabase
+        .from("users")
+        .select("id")
+        .eq("auth_user_id", user.id)
+        .maybeSingle();
+      if (!userRow) return jsonResponse({ error: "User record not found." }, 404);
+      const { error: updateAuthError } = await supabase.auth.admin.updateUserById(user.id, {
+        password: newPassword,
+      });
+      if (updateAuthError) return jsonResponse({ error: "Could not update password." }, 500);
+      await supabase.from("users").update({ must_reset_password: false, updated_by_user_id: user.id }).eq("id", userRow.id);
+      await logAudit(supabase, { actor_user_id: user.id, action: "user.password_reset", entity_type: "users", entity_id: userRow.id });
+      return jsonResponse({ ok: true });
     }
 
     const { user, ok, response } = await requireAdmin(req, supabase);
@@ -235,9 +264,27 @@ Deno.serve(async (req: Request) => {
           created_by_user_id: user.id,
           updated_by_user_id: user.id,
         };
+        const tempPassword = typeof body.password === "string" ? body.password : "";
+        if (tempPassword) {
+          if (tempPassword.length < 8) return jsonResponse({ error: "Password must be at least 8 characters." }, 400);
+          const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+            email: String(body.email).slice(0, 200),
+            password: tempPassword,
+            email_confirm: true,
+          });
+          if (authError) return jsonResponse({ error: authError.message || "Could not create auth account." }, 500);
+          row.auth_user_id = authData.user.id;
+          row.must_reset_password = true;
+          row.status = "active";
+        }
         const { data, error: insertError } = await supabase.from("users").insert(row).select("id").single();
-        if (insertError) return jsonResponse({ error: "Could not create the user." }, 500);
-        await logAudit(supabase, { actor_user_id: user.id, action: "user.create", entity_type: "users", entity_id: data.id, metadata: { name: row.name, email: row.email, role: row.role } });
+        if (insertError) {
+          if (row.auth_user_id) {
+            await supabase.auth.admin.deleteUser(row.auth_user_id as string);
+          }
+          return jsonResponse({ error: "Could not create the user." }, 500);
+        }
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.create", entity_type: "users", entity_id: data.id, metadata: { name: row.name, email: row.email, role: row.role, with_auth: !!tempPassword } });
         return jsonResponse({ id: data.id });
       }
 
