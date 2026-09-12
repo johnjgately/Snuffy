@@ -36,6 +36,30 @@ export interface User {
   oauthProvider?: string;
   oauthId?: string;
   avatarUrl?: string;
+  authUserId?: string;
+  loginProviders?: string[];
+  lastLoginAt?: string;
+  organizations?: { id: string; name: string; role: string }[];
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  marketType: string;
+  status: 'active' | 'suspended' | 'archived';
+  ownerId: string;
+  createdAt: string;
+}
+
+export interface OrganizationMembership {
+  id: string;
+  organizationId: string;
+  userId: string;
+  role: 'owner' | 'administrator' | 'manager' | 'member' | 'viewer';
+  status: 'active' | 'invited' | 'suspended';
+  createdAt: string;
 }
 
 export interface AIConnection {

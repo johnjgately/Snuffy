@@ -151,46 +151,34 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: "Incomplete user info from provider." }, 502);
       }
 
-      const { data: byOauthId } = await supabase
-        .from("users")
-        .select("id, name, email, role, status, mfa, oauth_provider, oauth_id")
-        .eq("oauth_id", userInfo.sub)
-        .maybeSingle();
+      // Use the profile-linking function to prevent duplicate profiles
+      const emailVerified = userInfo.email_verified === true || userInfo.verified_email === true;
+      const { data: linkResult, error: linkError } = await supabase.rpc("link_or_create_user_profile", {
+        p_auth_user_id: user.id,
+        p_email: userInfo.email,
+        p_name: typeof userInfo.name === "string" ? userInfo.name : null,
+        p_provider: provider,
+        p_avatar_url: typeof userInfo.picture === "string" ? userInfo.picture : null,
+        p_email_verified: emailVerified,
+      });
 
-      const { data: byEmail } = await supabase
-        .from("users")
-        .select("id, name, email, role, status, mfa, oauth_provider, oauth_id")
-        .eq("email", userInfo.email)
-        .maybeSingle();
+      if (linkError) return jsonResponse({ error: "Failed to link or create user profile." }, 500);
 
-      const existing = byOauthId ?? byEmail;
+      const result = linkResult as { user_id?: string; is_new?: boolean; action?: string; error?: string };
 
-      if (existing) {
-        const newStatus = existing.status === "invited" ? "active" : existing.status;
-        await supabase.from("users").update({
-          oauth_provider: provider,
-          oauth_id: userInfo.sub,
-          avatar_url: typeof userInfo.picture === "string" ? userInfo.picture : null,
-          last_active: "Just now",
-          status: newStatus,
-        }).eq("id", existing.id);
-        return jsonResponse({ user: { id: existing.id, name: existing.name, email: existing.email, role: existing.role, status: newStatus }, isNew: false });
+      if (result.error) {
+        return jsonResponse({ error: result.error, action: result.action ?? "unknown" }, 403);
       }
 
-      const { data: created, error: createError } = await supabase.from("users").insert({
-        name: typeof userInfo.name === "string" ? userInfo.name : userInfo.email.split("@")[0],
-        email: userInfo.email,
-        role: "Viewer",
-        status: "active",
-        mfa: false,
-        permissions: [],
-        oauth_provider: provider,
-        oauth_id: userInfo.sub,
-        avatar_url: typeof userInfo.picture === "string" ? userInfo.picture : null,
-        last_active: "Just now",
-      }).select("id, name, email, role, status").maybeSingle();
-      if (createError || !created) return jsonResponse({ error: "Failed to create user from OAuth." }, 500);
-      return jsonResponse({ user: created, isNew: true });
+      // Fetch the full user record for the response
+      const { data: userProfile } = await supabase
+        .from("users")
+        .select("id, name, email, role, status")
+        .eq("id", result.user_id!)
+        .maybeSingle();
+
+      if (!userProfile) return jsonResponse({ error: "Profile created but could not be retrieved." }, 500);
+      return jsonResponse({ user: userProfile, isNew: result.is_new ?? false, action: result.action ?? "existing" });
     }
 
     if (urlAction === "providers") {

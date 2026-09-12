@@ -93,10 +93,28 @@ Deno.serve(async (req: Request) => {
       if (resource === "users") {
         const { data, error } = await supabase
           .from("users")
-          .select("id, name, email, role, status, mfa, permissions, oauth_provider, oauth_id, avatar_url, last_active, created_at, owner_user_id")
+          .select("id, name, email, role, status, mfa, permissions, oauth_provider, oauth_id, avatar_url, last_active, created_at, owner_user_id, auth_user_id, email_normalized, login_providers, last_login_at")
           .order("created_at", { ascending: false });
         if (error) return jsonResponse({ error: "Could not load users." }, 500);
         return jsonResponse({ users: data ?? [] });
+      }
+
+      if (resource === "organizations") {
+        const { data, error } = await supabase
+          .from("organizations")
+          .select("id, name, slug, description, market_type, status, owner_user_id, created_at")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load organizations." }, 500);
+        return jsonResponse({ organizations: data ?? [] });
+      }
+
+      if (resource === "memberships") {
+        const { data, error } = await supabase
+          .from("organization_memberships")
+          .select("id, organization_id, user_id, role, status, created_at")
+          .order("created_at", { ascending: false });
+        if (error) return jsonResponse({ error: "Could not load memberships." }, 500);
+        return jsonResponse({ memberships: data ?? [] });
       }
 
       if (resource === "roles") {
@@ -338,6 +356,69 @@ Deno.serve(async (req: Request) => {
         const { error } = await supabase.from("role_permissions").delete().eq("capability", body.capability);
         if (error) return jsonResponse({ error: "Could not delete capability." }, 500);
         await logAudit(supabase, { actor_user_id: user.id, action: "permission.delete_capability", entity_type: "role_permissions", metadata: { capability: body.capability } });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "org-create") {
+        if (!body.name || !body.slug) return jsonResponse({ error: "Name and slug are required." }, 400);
+        const { data, error } = await supabase.from("organizations").insert({
+          name: String(body.name).slice(0, 200),
+          slug: String(body.slug).slice(0, 100).toLowerCase().replace(/[^a-z0-9-]/g, "-"),
+          description: typeof body.description === "string" ? body.description.slice(0, 500) : null,
+          market_type: typeof body.market_type === "string" ? body.market_type.slice(0, 50) : "general",
+          status: "active",
+          owner_user_id: user.id,
+          created_by_user_id: user.id,
+          updated_by_user_id: user.id,
+        }).select("id").single();
+        if (error) return jsonResponse({ error: "Could not create organization." }, 500);
+        // Add creator as owner
+        await supabase.from("organization_memberships").insert({
+          organization_id: data.id, user_id: user.id, role: "owner", status: "active",
+        });
+        await logAudit(supabase, { actor_user_id: user.id, action: "org.create", entity_type: "organizations", entity_id: data.id, metadata: { name: body.name, slug: body.slug } });
+        return jsonResponse({ id: data.id });
+      }
+
+      if (resource === "membership-add") {
+        if (!body.organization_id || !body.user_id || !body.role) return jsonResponse({ error: "Organization ID, user ID, and role are required." }, 400);
+        const role = String(body.role);
+        if (!["owner", "administrator", "manager", "member", "viewer"].includes(role)) return jsonResponse({ error: "Invalid role." }, 400);
+        const { error } = await supabase.from("organization_memberships").upsert({
+          organization_id: body.organization_id, user_id: body.user_id, role, status: "active",
+        }, { onConflict: "organization_id,user_id" });
+        if (error) return jsonResponse({ error: "Could not add member." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "membership.add", entity_type: "organization_memberships", metadata: { organization_id: body.organization_id, user_id: body.user_id, role } });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "membership-remove") {
+        if (!body.id) return jsonResponse({ error: "Membership ID is required." }, 400);
+        const { error } = await supabase.from("organization_memberships").delete().eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not remove member." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "membership.remove", entity_type: "organization_memberships", entity_id: body.id });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "ownership-transfer") {
+        if (!body.table_name || !body.record_id || !body.new_owner_user_id) return jsonResponse({ error: "Table name, record ID, and new owner are required." }, 400);
+        const { error } = await supabase.rpc("transfer_record_ownership", {
+          p_table_name: String(body.table_name).slice(0, 100),
+          p_record_id: body.record_id,
+          p_new_owner_user_id: body.new_owner_user_id,
+          p_new_ownership_type: typeof body.ownership_type === "string" ? body.ownership_type : "personal",
+          p_new_organization_id: body.organization_id ?? null,
+        });
+        if (error) return jsonResponse({ error: "Could not transfer ownership." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "ownership.transfer_admin", entity_type: body.table_name, entity_id: body.record_id, metadata: { new_owner: body.new_owner_user_id } });
+        return jsonResponse({ ok: true });
+      }
+
+      if (resource === "user-disable") {
+        if (!body.id) return jsonResponse({ error: "User ID is required." }, 400);
+        const { error } = await supabase.from("users").update({ status: "suspended", updated_by_user_id: user.id }).eq("id", body.id);
+        if (error) return jsonResponse({ error: "Could not disable user." }, 500);
+        await logAudit(supabase, { actor_user_id: user.id, action: "user.disable", entity_type: "users", entity_id: body.id });
         return jsonResponse({ ok: true });
       }
 
