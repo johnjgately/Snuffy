@@ -38,10 +38,6 @@ export function AuditLogs() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [headers, setHeaders] = useState<Record<string, string>>({
-    Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-    'Content-Type': 'application/json',
-  });
 
   const [search, setSearch] = useState('');
   const [filterAction, setFilterAction] = useState('');
@@ -51,10 +47,6 @@ export function AuditLogs() {
   const [filterEntityId, setFilterEntityId] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
-
-  useEffect(() => {
-    getAuthHeaders().then(setHeaders);
-  }, []);
 
   const loadLogs = useCallback(async () => {
     setLoading(true);
@@ -70,6 +62,7 @@ export function AuditLogs() {
       if (toDate) params.set('to_date', toDate);
       params.set('limit', '500');
 
+      const headers = await getAuthHeaders();
       const resp = await fetch(`${adminApiUrl}?${params}`, { method: 'GET', headers });
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || `Request failed (${resp.status})`);
@@ -79,12 +72,11 @@ export function AuditLogs() {
     } finally {
       setLoading(false);
     }
-  }, [headers, filterAction, filterEntityType, filterOutcome, filterActor, filterEntityId, fromDate, toDate]);
+  }, [filterAction, filterEntityType, filterOutcome, filterActor, filterEntityId, fromDate, toDate]);
 
   useEffect(() => {
-    if (headers.Authorization?.includes('anon')) return;
     loadLogs();
-  }, [headers, loadLogs]);
+  }, [loadLogs]);
 
   const filtered = logs.filter((e) => {
     if (!search) return true;
