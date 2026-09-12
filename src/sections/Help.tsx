@@ -29,6 +29,7 @@ import {
   Settings2,
   FileLock,
   Lock,
+  Building2,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -218,6 +219,8 @@ const chapters: HelpChapter[] = [
       'Administrators have full control. Operators can run and manage automations. Analysts can access data and AI features. Auditors can view logs and settings but cannot make changes. Viewers have read-only access.',
       'You can invite new users, suspend accounts, and track when each user was last active. Multi-factor authentication can be enabled per user for additional security.',
       'Users can also be imported via OAuth2. Configure a provider (Google, GitHub, or Microsoft) in the OAuth2 settings, and users can sign in with their existing accounts. New users are automatically imported with the Viewer role.',
+      'When a user signs in through OAuth, Snuffy uses a profile-linking system to prevent duplicate accounts. The system first looks for an existing profile by the authentication identity (auth_user_id). If not found, it checks for a matching verified email address. If exactly one active profile has that email, it safely links the new authentication identity to the existing profile. If multiple profiles match or the email is unverified, the case is flagged for administrator review. This ensures every person has exactly one application profile, no matter how many providers they use to sign in.',
+      'Disabled users cannot regain access through any provider. When a user is disabled, their personal records remain but are inaccessible. Organization-owned records are unaffected — they belong to the organization, not the individual.',
       'Role assignments and permission changes are audited. Every time an administrator changes a user\'s role or updates a permission, an audit log entry is created automatically.',
     ],
   },
@@ -232,6 +235,20 @@ const chapters: HelpChapter[] = [
       'Storage buckets are private by default. Anonymous users cannot list, upload, download, or delete files. Downloads use signed URLs that expire after 60 seconds, so links cannot be shared or reused.',
       'File access is tracked. Every download, preview, and share is logged in the file access log, which you can review alongside the audit trail. This gives you a complete picture of who accessed what file and when.',
       'Only administrators can access the Storage Review section. Standard users see only their own files in the Documents section.',
+    ],
+  },
+  {
+    id: 'organizations',
+    title: 'Organizations',
+    icon: Building2,
+    description: 'Multi-tenant structure for teams and markets',
+    content: [
+      'Organizations let you group users and data by company, agency, team, or market. A user can belong to multiple organizations, each with a different role and level of access.',
+      'Each organization has a name, a URL-safe slug, a description, and a market type. The market type is a configurable category (such as healthcare, finance, or government) that allows the platform to adapt to different industries without changing the core identity and ownership architecture.',
+      'Organization roles determine what members can do: owners and administrators can manage members and organization-owned data; managers can read organization data; members and viewers can access shared records but cannot manage the organization.',
+      'Every record in the system has an ownership type: personal, organization, or shared. Personal records belong to one user and are private by default. Organization records belong to the organization and are accessible to authorized members. Shared records are available to both the owner and organization members.',
+      'Organization administrators cannot access a user\'s personal records unless the user explicitly shares them. This keeps personal data private while allowing collaboration on organization-owned data.',
+      'When an employee or member leaves an organization, their membership is removed but organization-owned records are preserved. The former member\'s personal records remain theirs. An administrator can transfer ownership of personal records to another user if needed, and all transfers are fully audited.',
     ],
   },
   {

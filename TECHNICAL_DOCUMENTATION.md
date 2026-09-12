@@ -4,7 +4,7 @@
 **Product:** Snuffy — AI Command Assistant
 **Frontend:** React 18, TypeScript, Vite
 **Backend platform:** Supabase
-**Last reviewed:** 2026-09-11
+**Last reviewed:** 2026-09-12
 
 ## 1. Purpose and scope
 
@@ -24,7 +24,7 @@ Snuffy is a browser-based command center for AI operations. The product combines
 - Row-level security with RBAC enforcement
 - Tamper-resistant audit logging via database triggers
 
-This document describes the repository as it currently exists, including the security hardening, RBAC infrastructure, audit system, storage governance, and test coverage.
+This document describes the repository as it currently exists, including the security hardening, RBAC infrastructure, audit system, storage governance, multi-tenant ownership model, organization memberships, profile linking, and test coverage.
 
 ## 2. Current implementation status
 
@@ -68,8 +68,22 @@ The database, edge functions, and frontend have undergone a comprehensive securi
 - Tamper-resistant audit logging via database triggers on all protected tables
 - File access logging with download/preview/share tracking
 - Storage review section for administrators
-- Automated test suite (18 tests) covering anonymous access denial
+- Multi-tenant ownership model with organizations, memberships, and ownership types
+- Profile linking via `auth_user_id` to prevent duplicate user profiles across providers
+- Ownership transfer with audit logging
+- Automated test suite (26 tests) covering anonymous access denial and multi-tenant isolation
 - SQL test suite covering user isolation, admin access, ownership, audit, and RAG health
+
+### Multi-tenant ownership — 2026-09-12
+
+The database and edge functions now support a multi-market ownership model:
+
+- **Organizations and memberships**: New `organizations` and `organization_memberships` tables allow users to belong to multiple organizations with roles (owner, administrator, manager, member, viewer).
+- **Ownership types**: Every owned record has `ownership_type` (`personal`, `organization`, `shared`) and `organization_id` columns. RLS policies use `can_access_record()` and `can_write_record_typed()` to enforce access based on ownership type.
+- **Profile linking**: The `users` table now has `auth_user_id` (unique, linked to `auth.users`), `email_normalized`, `login_providers`, and `last_login_at`. The `link_or_create_user_profile()` function prevents duplicate profiles across OAuth providers and email/password sign-in.
+- **Ownership transfer**: The `transfer_record_ownership()` function allows admins or record owners to transfer ownership with full audit logging.
+- **Admin API**: Extended with organization CRUD, membership management, ownership transfer, and user disabling endpoints.
+- **Tests**: 8 new multi-tenant tests (26 total) covering anonymous access denial for organizations, memberships, and new RPC functions.
 
 ### Partially implemented or demo-oriented
 
@@ -99,8 +113,8 @@ Browser
          ai-proxy      — AI provider chat and testing
          web-search    — Brave/DuckDuckGo search
          knowledge-rag — Document processing, RAG, settings
-         oauth         — OAuth2 user import
-         admin-api     — User/role/permission management
+         oauth         — OAuth2 profile linking and user import
+         admin-api     — User/role/permission/org/membership management
               |
               +--> AI providers, search providers, OAuth providers,
                    and embedding services
@@ -134,6 +148,7 @@ supabase/
 tests/
   helpers.ts               Test client setup and constants
   rls.test.ts              Automated anonymous access denial tests (18 tests)
+  multi-tenant.test.ts     Multi-tenant anonymous access tests (8 tests)
   sql-tests.sql            SQL test suite for authenticated-user scenarios
 
 vitest.config.ts           Vitest configuration
@@ -277,7 +292,7 @@ Browser support and microphone permission are required.
 
 ## 7. Database model
 
-All tables use Row Level Security. Policies enforce ownership (`owner_user_id = auth.uid()`), admin access (`is_admin()`), or manager relationships. Anonymous access is denied on all protected tables.
+All tables use Row Level Security. Policies enforce ownership (`owner_user_id = auth.uid()`), organization membership, admin access (`is_admin()`), or manager relationships. Anonymous access is denied on all protected tables.
 
 ### RBAC infrastructure
 
@@ -293,6 +308,23 @@ The database implements role-based access control through the following objects:
 - `can_write_record(text, uuid)` — Same as `can_read_record` but for write operations.
 - `current_user_id()` — Returns `auth.uid()`.
 
+### Multi-tenant ownership
+
+The system supports three ownership types for multi-market use:
+
+- **Personal** (`ownership_type = 'personal'`): Records owned by an individual user. Only the owner can access them.
+- **Organization** (`ownership_type = 'organization'`): Records owned by an organization. Active org members can read; org admins can write.
+- **Shared** (`ownership_type = 'shared'`): Records with both a personal owner and an organization. Owner and org members can read; owner and org admins can write.
+
+Access control functions for multi-tenant:
+
+- `can_access_record(text, uuid, uuid, text)` — Checks SELECT access based on ownership type, owner, org, and membership.
+- `can_write_record_typed(text, uuid, uuid, text)` — Checks UPDATE/DELETE access based on ownership type.
+- `is_org_member(uuid)` — Checks if the current user is an active member of the given organization.
+- `is_org_admin(uuid)` — Checks if the current user is an org owner or administrator.
+- `transfer_record_ownership(text, uuid, uuid, text, uuid)` — Transfers record ownership with authorization checks and audit logging.
+- `link_or_create_user_profile(uuid, text, text, text, text, boolean)` — Links or creates a user profile on sign-in, preventing duplicates.
+
 ### Ownership columns
 
 Every protected table has these columns (where applicable):
@@ -301,6 +333,8 @@ Every protected table has these columns (where applicable):
 - `created_by_user_id` — The user who created the record. Set automatically.
 - `updated_by_user_id` — The user who last updated the record. Set automatically on insert and update.
 - `updated_at` — Timestamp of the last update. Set automatically.
+- `ownership_type` — `personal`, `organization`, or `shared`. Defaults to `personal`.
+- `organization_id` — The organization that owns the record (for organization/shared types). NULL for personal records.
 
 ### Audit system
 
@@ -336,7 +370,15 @@ Stores automation execution history, status, output, summary, timestamps, and ow
 
 #### `users`
 
-Custom application directory: names, emails, roles, statuses, MFA flags, permissions, avatar data, activity metadata, and OAuth identifiers. This table is separate from Supabase's `auth.users`. Policies use `can_read_record` and `can_write_record`.
+Custom application directory: names, emails, roles, statuses, MFA flags, permissions, avatar data, activity metadata, and OAuth identifiers. Extended with `auth_user_id` (unique link to `auth.users`), `email_normalized` (lowercase trimmed email for matching), `login_providers` (array of provider names), and `last_login_at`. The `link_or_create_user_profile()` function handles profile creation and linking on sign-in. This table is separate from Supabase's `auth.users`. Policies use `can_read_record` and `can_write_record`.
+
+#### `organizations`
+
+Stores organizations: name, slug (unique), description, `market_type` (configurable market/category), status, and ownership columns. Members can see their orgs; org admins/owners can manage them.
+
+#### `organization_memberships`
+
+Maps users to organizations with roles (`owner`, `administrator`, `manager`, `member`, `viewer`) and status. Unique constraint on (organization_id, user_id). Members can see their own memberships; org admins can manage memberships.
 
 #### `role_permissions`
 
@@ -500,7 +542,8 @@ Purpose:
 - Create authorization URLs with CSRF state tokens
 - Exchange authorization codes for access tokens
 - Fetch provider user profiles
-- Import or update users in the custom users table
+- Link or create application user profiles via `link_or_create_user_profile()` RPC
+- Prevents duplicate profiles across providers and email/password sign-in
 
 Security:
 
@@ -508,7 +551,10 @@ Security:
 - Provider URLs validated to prevent SSRF (blocks localhost, internal IPs, metadata endpoints).
 - OAuth state is single-use, bound to the user, and expires after 10 minutes.
 - State is atomically claimed (concurrent requests cannot reuse it).
-- PostgREST filter injection fixed — user lookup uses separate parameterized queries instead of `.or()`.
+- Profile linking uses the `link_or_create_user_profile` SECURITY DEFINER function — no direct table queries.
+- Verified email matching: only links profiles when the email is verified and exactly one active profile matches.
+- Unverified emails or multiple matching profiles are flagged for admin review.
+- Disabled users cannot regain access through OAuth.
 - Client secrets fetched server-side, never exposed to browser.
 - Input validation on provider, code, and state parameters (length limits).
 
@@ -516,15 +562,20 @@ Security:
 
 Purpose:
 
-- User management (list, create, update, delete, suspend/reactivate)
+- User management (list, create, update, delete, disable/suspend)
 - Role and permission management (permission matrix, capability CRUD)
 - OAuth configuration management
+- Organization management (list, create)
+- Membership management (add, remove members)
+- Ownership transfer (transfer record ownership between users or to organizations)
+- User listing includes `auth_user_id`, `login_providers`, `last_login_at`, and `email_normalized`
 
 Security:
 
 - JWT verification required.
 - Admin role verification required for all operations.
 - Service-role access for database operations.
+- Ownership transfers are audited via `transfer_record_ownership()`.
 
 ## 10. Security posture
 
@@ -533,7 +584,7 @@ Security:
 The system uses a deny-by-default approach:
 
 1. **Anonymous access is denied** on all protected tables, storage buckets, and RPC functions. The anon role has no grants on any protected table.
-2. **Row-level security** is enabled on every table. Policies enforce ownership (`owner_user_id = auth.uid()`), admin access (`is_admin()`), or manager relationships.
+2. **Row-level security** is enabled on every table. Policies enforce ownership (`owner_user_id = auth.uid()`), organization membership (`is_org_member`/`is_org_admin`), admin access (`is_admin()`), or manager relationships. The `can_access_record` and `can_write_record_typed` functions handle personal, organization, and shared ownership types.
 3. **SECURITY DEFINER functions** are restricted to the authenticated role. Trigger functions are restricted from PUBLIC (only callable by triggers, not via the API).
 4. **Storage buckets** are private. Downloads use signed URLs with 60-second expiration.
 5. **API keys** are encrypted at rest and fetched server-side. The browser never sees raw API keys.
@@ -548,6 +599,13 @@ Audit events are created automatically by database triggers for:
 - Record changes (create, update, delete) on all protected tables
 - Role changes (assignment, revocation)
 - Denied access (RLS policy violations can be manually logged)
+- Profile creation and linking (`auth.profile_created`, `auth.profile_linked`)
+- Login and login denial (`auth.login`, `auth.login_denied`)
+- Profile conflicts flagged for admin review (`auth.profile_conflict`)
+- Ownership transfers (`ownership.transfer`)
+- Organization membership changes (`membership.add`, `membership.remove`)
+- Organization creation (`org.create`)
+- User disabling (`user.disable`)
 
 Audit logs are tamper-resistant — regular users cannot delete or modify them. Only admins can read all audit logs; standard users see only their own.
 
@@ -581,6 +639,11 @@ Run with `npm test`. Uses Vitest.
 - Anonymous cannot insert/delete documents
 - Anonymous cannot call: rag_health_check, rag_search, record_file_access
 - Anonymous cannot download/upload to: documents bucket, knowledge-files bucket
+
+**`tests/multi-tenant.test.ts`** — 8 tests verifying multi-tenant anonymous access denial:
+- Anonymous cannot read/insert organizations
+- Anonymous cannot read organization_memberships
+- Anonymous cannot call: link_or_create_user_profile, transfer_record_ownership, is_org_member, is_org_admin, can_access_record
 
 ### SQL test suite
 
@@ -674,6 +737,8 @@ Recommended verification sequence:
 - The app's localStorage state is browser-specific and is not synchronized between devices.
 - The custom user table and Supabase Auth user list can diverge if users are managed directly in Supabase.
 - OAuth imports users into the custom users table but does not establish a Supabase Auth session.
+- Organization management UI is not yet built — the admin API endpoints exist but the frontend does not have an organization management screen.
+- The `can_read_record` and `can_write_record` functions are still used by some tables (users, knowledge_settings, oauth_configs, search_settings, role_permissions, storage_settings) that have not been migrated to the typed ownership model.
 - Rate limiting is not yet implemented.
 - Upload size enforcement is in edge function code, not at the storage policy level.
 - Single-row settings tables are not enforced by a database constraint.
@@ -719,6 +784,21 @@ Recommended verification sequence:
 - Add RLS policies for oauth_states
 - Revoke EXECUTE on 14 functions from anon/PUBLIC
 - Replace FOR ALL policies with per-verb policies on app_roles and manager_relationships
+
+### Multi-tenant ownership (2026-09-12)
+
+- Create organizations and organization_memberships tables with RLS policies and triggers
+- Add auth_user_id, email_normalized, login_providers, last_login_at to users table
+- Add unique partial indexes on auth_user_id and email_normalized
+- Create link_or_create_user_profile function for profile linking
+- Add ownership_type and organization_id columns to all 15 owned tables
+- Create can_access_record, can_write_record_typed, is_org_member, is_org_admin functions
+- Create transfer_record_ownership function
+- Update RLS policies on 10 core tables to use typed ownership model
+- Revoke EXECUTE on new functions from anon
+- Update OAuth edge function to use link_or_create_user_profile
+- Update admin-api with organization, membership, ownership transfer, and user-disable endpoints
+- Add 8 multi-tenant tests (26 total)
 
 ## 17. Glossary
 
