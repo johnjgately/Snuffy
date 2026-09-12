@@ -5,6 +5,9 @@
 **Frontend:** React 18, TypeScript, Vite
 **Backend platform:** Supabase
 **Last reviewed:** 2026-09-12
+**Version:** 2.0.0
+**Commit:** `security-hardening-v2`
+**Migration range:** `20260824210621` – `20260912206000`
 
 ## 1. Purpose and scope
 
@@ -24,7 +27,7 @@ Snuffy is a browser-based command center for AI operations. The product combines
 - Row-level security with RBAC enforcement
 - Tamper-resistant audit logging via database triggers
 
-This document describes the repository as it currently exists, including the security hardening, RBAC infrastructure, audit system, storage governance, multi-tenant ownership model, organization memberships, profile linking, and test coverage.
+This document describes the repository as it currently exists, including the security hardening, RBAC infrastructure, audit system with integrity hashing, storage governance, multi-market tenancy model, organization memberships, profile linking, emergency stop system, local AI connector registry, automation reliability, data governance, account security, and test coverage.
 
 ## 2. Current implementation status
 
@@ -59,7 +62,7 @@ The database, edge functions, and frontend have undergone a comprehensive securi
 - Supabase email/password sign-up, sign-in, session restoration, and sign-out
 - Supabase PostgreSQL migrations with row-level security and RBAC
 - Supabase Storage buckets with private access and owner-scoped policies
-- Five Supabase Edge Functions (ai-proxy, web-search, knowledge-rag, oauth, admin-api)
+- Six Supabase Edge Functions (ai-proxy, web-search, knowledge-rag, oauth, admin-api, auth-api)
 - AI chat requests through the AI proxy function
 - Web search through the web-search function with Brave and DuckDuckGo
 - Knowledge retrieval and RAG search through the knowledge-rag function
@@ -71,8 +74,95 @@ The database, edge functions, and frontend have undergone a comprehensive securi
 - Multi-tenant ownership model with organizations, memberships, and ownership types
 - Profile linking via `auth_user_id` to prevent duplicate user profiles across providers
 - Ownership transfer with audit logging
-- Automated test suite (26 tests) covering anonymous access denial and multi-tenant isolation
+- Automated test suite (60 tests) covering anonymous access denial, multi-tenant isolation, and new security table access control
 - SQL test suite covering user isolation, admin access, ownership, audit, and RAG health
+- Tamper-resistant audit logging with integrity hash chaining via database triggers
+- Emergency stop system with 11 independently controlled service switches
+- Local AI connector registry with SSRF prevention and allowlisted endpoints
+- Account security: email verification, password reset tokens, MFA (TOTP), session tracking, account lockout
+- Multi-market tenancy with markets table and market_id on all organization-owned records
+- Automation reliability: retry, idempotency, concurrency limits, timeout, and cancellation
+- Data governance: classifications, legal holds, retention policies, and export tracking
+- Cross-market transfer and share approval workflow with platform admin oversight
+- Audit log integrity hashing (SHA256 chain) for tamper detection
+
+### Security hardening v2 — 2026-09-12
+
+The database, edge functions, and frontend have undergone a comprehensive security and compliance upgrade:
+
+**Multi-market tenancy:**
+- New `markets` table with RLS — platform admins can CRUD, all authenticated users can read active markets
+- `market_id` column added to all 14 organization-owned tables, backfilled from organizations
+- `is_same_market()` and `get_org_market_id()` helper functions for market-based RLS enforcement
+- Cross-market transfers and shares require platform admin approval with recorded reason
+
+**Account security:**
+- `password_reset_tokens` table — single-use, 1-hour lifetime, SHA256-hashed tokens
+- `mfa_enrollments` table — TOTP-based MFA with hashed secrets
+- `user_sessions` table — session tracking with idle (30 min) and absolute (12 hour) timeouts, revocation
+- `login_attempts` and `account_lockouts` tables — rate limiting (5 attempts/15 min) with automatic lockout
+- 12 new columns on `users` table: email_verified, mfa_enabled, mfa_required, disabled, locked_until, password_changed_at, created_by_admin_user_id, initial_password_changed, and more
+- `organizations.mfa_required` column for org-level MFA policy
+- Helper functions: `hash_token()`, `is_account_locked()`, `count_recent_failures()`, `revoke_user_sessions()`, `invalidate_reset_tokens()`
+
+**Emergency stop:**
+- `emergency_stop_switches` table — 11 seeded service switches with activation/restoration tracking
+- `emergency_stop_history` table — append-only audit log of all toggle events
+- `is_service_stopped()` helper function for runtime checks
+- Every activation and restoration requires a reason and creates an audit event
+
+**Local AI connectors:**
+- `local_ai_connectors` table — registered, approved connectors with allowlisted endpoints, health status, cert config
+- `local_ai_connector_requests` table — audit log of all requests routed through connectors
+- Platform admin approval required; users cannot enter arbitrary URLs
+
+**Automation reliability:**
+- Added to `automations`: time_zone, concurrency_policy, max_concurrent_runs, max_retry_count, retry_backoff_base_seconds, timeout_seconds, notification_recipients, paused/paused_at/paused_by/paused_reason
+- Added to `automation_runs`: idempotency_key (unique index), retry_count, max_retries, timeout_at, cancelled_at/cancelled_by/cancel_reason, error_message, market_id, trigger_type, inputs
+- Status CHECK constraint updated: queued, running, succeeded, failed, timed_out, cancelled, skipped, paused, retrying
+
+**Document security & data governance:**
+- Added to `documents`: quarantined, quarantine_reason, malware_scan_status, prompt_injection_detected, legal_hold, storage_object_name, retention_expires_at
+- Added to `knowledge_documents`: quarantined, malware_scan_status, prompt_injection_detected, legal_hold
+- New `data_classifications` table — 4 levels: public, internal, confidential, restricted
+- New `legal_holds` table — master records for holds across any entity type
+- New `export_requests` table — tracks all data export requests with scope, status, and signed URL expiry
+- New `retention_policies` table — configurable retention by data type and organization
+
+**API security & cross-market transfers:**
+- New `api_rate_limits` table — per-user, per-IP, per-endpoint rate limit tracking
+- New `cross_market_transfers` table — cross-org/market ownership transfer approval workflow
+- New `cross_market_shares` table — cross-market sharing approval workflow
+- `audit_logs` gains `integrity_hash` and `previous_hash` columns with auto-computation trigger
+- `record_shares` gains `market_id`, `share_scope`, `expires_at`, `revoked_at` columns
+
+**New edge function — `auth-api`:**
+- Password reset request/confirm with single-use tokens
+- Email verification send/confirm with rate limiting
+- MFA enroll/verify/disable (TOTP)
+- Login attempt tracking with automatic lockout after 5 failures
+- Session listing and revocation
+- Account status checks (disabled, locked, email verified, MFA)
+
+**Updated edge function — `admin-api`:**
+- Emergency stop toggle with required reason
+- Market CRUD
+- Connector create/approve/delete
+- Legal hold place/release
+- Cross-market transfer approval
+- Retention policy management
+- User enable/disable with session revocation
+- Organization MFA policy toggle
+- `my-role` endpoint now returns email_verified, mfa_enabled, mfa_required, disabled, locked
+
+**New frontend sections:**
+- Emergency Stop dashboard with 11 service switches and activation history
+- Authorization Matrix showing 6 roles across 14 data types and 8 operations
+- Local AI Connectors management with approval workflow
+- Data Governance with classifications, legal holds, retention policies, and export tracking
+
+**Tests:**
+- 34 new tests covering anonymous access denial to all new security tables, schema validation, and helper function existence (60 total)
 
 ### Multi-tenant ownership — 2026-09-12
 
@@ -100,10 +190,12 @@ Browser
   |
   +--> Supabase Auth
   |      Email/password sessions and token refresh
+  |      Email verification, MFA (TOTP), session tracking
   |
   +--> Supabase Data API
-  |      PostgreSQL tables protected by RLS + RBAC
-  |      SECURITY DEFINER functions for audit and ownership
+  |      PostgreSQL tables protected by RLS + RBAC + market boundaries
+  |      SECURITY DEFINER functions for audit, ownership, and security
+  |      Audit integrity hash chaining (SHA256)
   |
   +--> Supabase Storage
   |      documents bucket (private, owner-scoped)
@@ -114,10 +206,11 @@ Browser
          web-search    — Brave/DuckDuckGo search
          knowledge-rag — Document processing, RAG, settings
          oauth         — OAuth2 profile linking and user import
-         admin-api     — User/role/permission/org/membership management
+         admin-api     — User/role/permission/org/market/governance management
+         auth-api      — Password reset, MFA, lockout, email verification, sessions
               |
               +--> AI providers, search providers, OAuth providers,
-                   and embedding services
+                   embedding services, and local AI connectors (allowlisted)
 ```
 
 There is no separate application server in this repository. Browser code talks directly to Supabase for authentication and table reads (protected by RLS), and calls Edge Functions for operations that require server-side provider keys or service-role access.
@@ -257,6 +350,10 @@ Only the public anonymous key belongs in browser code. Service-role keys and pro
 - Feature Flags
 - Integrations
 - Security & Settings
+- Emergency Stop (admin only)
+- Authorization Matrix
+- Local AI Connectors (admin only)
+- Data Governance (admin only)
 
 ### Support
 
@@ -611,11 +708,14 @@ Audit logs are tamper-resistant — regular users cannot delete or modify them. 
 
 ### Remaining hardening items
 
-- Add rate limiting to AI, search, OAuth, and document-processing operations.
-- Add upload size enforcement at the storage policy level (currently enforced in edge function code).
-- Complete OAuth PKCE and nonce support.
-- Add DNS re-resolution protection for outbound endpoint validation.
+- CORS origin allowlist: Edge functions currently use `*` for CORS (Supabase client requirement). Production should restrict via reverse proxy or Supabase project settings.
+- Content Security Policy headers: Should be configured at the hosting/CDN layer for the specific production domain.
+- Email service: Password reset and email verification tokens are returned via API response. Production should configure an email service to send links.
+- TOTP verification: MFA enroll generates a TOTP secret but the verify endpoint accepts any 6-digit code. Production should integrate a proper TOTP library.
+- Malware scanning: Document quarantine infrastructure is in place but actual scanning requires integration with a scanning service.
+- DNS re-resolution protection for outbound endpoint validation.
 - Enforce single-row settings with a database constraint.
+- OAuth PKCE and nonce support.
 
 ## 11. Configuration and secrets
 
@@ -644,6 +744,14 @@ Run with `npm test`. Uses Vitest.
 - Anonymous cannot read/insert organizations
 - Anonymous cannot read organization_memberships
 - Anonymous cannot call: link_or_create_user_profile, transfer_record_ownership, is_org_member, is_org_admin, can_access_record
+
+**`tests/security.test.ts`** — 34 tests verifying new security table access control and schema:
+- Anonymous cannot read: password_reset_tokens, mfa_enrollments, user_sessions, login_attempts, account_lockouts, api_rate_limits
+- Anonymous cannot read/update: emergency_stop_switches, emergency_stop_history
+- Anonymous cannot read/insert: markets, local_ai_connectors, local_ai_connector_requests
+- Anonymous cannot read/insert: legal_holds, export_requests, retention_policies, cross_market_transfers, cross_market_shares, data_classifications
+- Schema validation: users, automations, automation_runs, documents, organizations tables have new columns
+- Helper function existence: hash_token, is_account_locked, revoke_user_sessions, invalidate_reset_tokens, get_org_market_id, is_same_market, is_service_stopped
 
 ### SQL test suite
 
@@ -737,11 +845,16 @@ Recommended verification sequence:
 - The app's localStorage state is browser-specific and is not synchronized between devices.
 - The custom user table and Supabase Auth user list can diverge if users are managed directly in Supabase.
 - OAuth imports users into the custom users table but does not establish a Supabase Auth session.
-- Organization management UI is not yet built — the admin API endpoints exist but the frontend does not have an organization management screen.
 - The `can_read_record` and `can_write_record` functions are still used by some tables (users, knowledge_settings, oauth_configs, search_settings, role_permissions, storage_settings) that have not been migrated to the typed ownership model.
-- Rate limiting is not yet implemented.
+- Rate limiting infrastructure (api_rate_limits table) exists but is not yet enforced in edge function middleware.
 - Upload size enforcement is in edge function code, not at the storage policy level.
 - Single-row settings tables are not enforced by a database constraint.
+- CORS origin allowlist is not yet configured for production domains.
+- Content Security Policy headers are not yet set (should be configured at the hosting/CDN layer).
+- Email service for password reset and email verification links is not yet configured.
+- TOTP code verification in the auth-api edge function accepts any 6-digit code (should integrate a proper TOTP library).
+- Malware scanning infrastructure is in place but actual scanning requires integration with a scanning service (e.g., ClamAV, VirusTotal API).
+- DNS re-resolution protection for outbound endpoint validation is not yet implemented.
 
 ## 16. Migration history
 
@@ -800,6 +913,26 @@ Recommended verification sequence:
 - Update admin-api with organization, membership, ownership transfer, and user-disable endpoints
 - Add 8 multi-tenant tests (26 total)
 
+### Security hardening v2 (2026-09-12)
+
+- Create markets table with RLS, add market_id to all 14 org-owned tables, backfill
+- Create account security tables: password_reset_tokens, mfa_enrollments, user_sessions, login_attempts, account_lockouts
+- Add 12 account security columns to users table (email_verified, disabled, locked_until, etc.)
+- Add mfa_required to organizations table
+- Create helper functions: hash_token, is_account_locked, count_recent_failures, revoke_user_sessions, invalidate_reset_tokens
+- Create emergency_stop_switches (11 seeded switches) and emergency_stop_history tables
+- Create local_ai_connectors and local_ai_connector_requests tables with RLS
+- Add automation reliability columns: retry, idempotency, concurrency, timeout, notifications, paused state
+- Add document security columns: quarantined, malware_scan_status, prompt_injection_detected, legal_hold
+- Create data_classifications, legal_holds, export_requests, retention_policies tables
+- Create api_rate_limits, cross_market_transfers, cross_market_shares tables
+- Add integrity_hash and previous_hash to audit_logs with auto-computation trigger
+- Add market_id, share_scope, expires_at, revoked_at to record_shares
+- Deploy auth-api edge function (password reset, MFA, lockout, email verification, sessions)
+- Update admin-api with emergency stop, markets, connectors, legal holds, transfers, retention, user enable/disable
+- Add 4 new frontend sections: Emergency Stop, Authorization Matrix, Local AI Connectors, Data Governance
+- Add 34 new security tests (60 total)
+
 ## 17. Glossary
 
 - **RLS:** Row Level Security; database rules that decide which rows a user can read or change.
@@ -814,3 +947,9 @@ Recommended verification sequence:
 - **SECURITY DEFINER:** A PostgreSQL function attribute that causes the function to run with the privileges of the function owner rather than the caller.
 - **CSRF:** Cross-Site Request Forgery; an attack where a third-party site tricks a user's browser into making unwanted requests.
 - **Signed URL:** A time-limited URL that grants temporary access to a private storage object.
+- **TOTP:** Time-based One-Time Password; a 6-digit code generated by an authenticator app that changes every 30 seconds.
+- **SSRF:** Server-Side Request Forgery; a vulnerability where an attacker causes a server to make requests to unintended internal or private network resources.
+- **Market:** A top-level organizational tenant in the multi-market tenancy model. Each organization belongs to exactly one market, and data cannot cross markets by default.
+- **Legal Hold:** A designation that prevents data from being deleted or purged by normal retention processes, typically used for litigation or compliance.
+- **Idempotency Key:** A unique identifier for an automation run that prevents duplicate executions of the same task.
+- **Integrity Hash:** A SHA256 hash computed for each audit log entry, chained to the previous entry's hash, enabling detection of tampering.
