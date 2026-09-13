@@ -1,16 +1,38 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
+const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+const isProduction = Deno.env.get("APP_ENV") === "production";
 
-function jsonResponse(body: unknown, status = 200) {
+function getCorsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get("Origin") ?? "";
+  if (isProduction) {
+    if (ALLOWED_ORIGINS.length > 0 && ALLOWED_ORIGINS.includes(origin)) {
+      return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+      };
+    }
+    return {
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+      "Vary": "Origin",
+    };
+  }
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+  };
+}
+
+function jsonResponse(req: Request, body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json" },
   });
 }
 
@@ -34,7 +56,7 @@ function validateProviderUrl(value: string): void {
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
+    return new Response(null, { status: 200, headers: getCorsHeaders(req) });
   }
 
   try {
@@ -43,14 +65,14 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
     const user = await getUser(req, supabase);
-    if (!user) return jsonResponse({ error: "Unauthorized." }, 401);
+    if (!user) return jsonResponse(req, { error: "Unauthorized." }, 401);
 
     const url = new URL(req.url);
     const urlAction = url.searchParams.get("action");
 
     if (urlAction === "authorize") {
       const provider = url.searchParams.get("provider");
-      if (!provider || provider.length > 50) return jsonResponse({ error: "Provider is required." }, 400);
+      if (!provider || provider.length > 50) return jsonResponse(req, { error: "Provider is required." }, 400);
 
       const { data: config, error: configError } = await supabase
         .from("oauth_configs")
@@ -58,7 +80,7 @@ Deno.serve(async (req: Request) => {
         .eq("provider", provider)
         .eq("enabled", true)
         .maybeSingle();
-      if (configError || !config) return jsonResponse({ error: "OAuth provider is not configured or not enabled." }, 404);
+      if (configError || !config) return jsonResponse(req, { error: "OAuth provider is not configured or not enabled." }, 404);
 
       validateProviderUrl(config.auth_url);
       const state = crypto.randomUUID();
@@ -68,7 +90,7 @@ Deno.serve(async (req: Request) => {
         user_id: user.id,
         expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       });
-      if (stateError) return jsonResponse({ error: "Could not start OAuth authorization." }, 500);
+      if (stateError) return jsonResponse(req, { error: "Could not start OAuth authorization." }, 500);
 
       const redirectUri = url.origin + "/oauth/callback";
       const params = new URLSearchParams({
@@ -78,18 +100,18 @@ Deno.serve(async (req: Request) => {
         scope: config.scopes,
         state,
       });
-      return jsonResponse({ authUrl: `${config.auth_url}?${params.toString()}`, state });
+      return jsonResponse(req, { authUrl: `${config.auth_url}?${params.toString()}`, state });
     }
 
     if (req.method === "POST") {
       const body = await req.json();
-      if (body.action !== "callback") return jsonResponse({ error: "Unknown action." }, 400);
+      if (body.action !== "callback") return jsonResponse(req, { error: "Unknown action." }, 400);
 
       const provider = typeof body.provider === "string" ? body.provider : "";
       const code = typeof body.code === "string" ? body.code : "";
       const state = typeof body.state === "string" ? body.state : "";
       if (!provider || !code || !state || code.length > 2000 || state.length > 100) {
-        return jsonResponse({ error: "Invalid OAuth callback." }, 400);
+        return jsonResponse(req, { error: "Invalid OAuth callback." }, 400);
       }
 
       const { data: stateRow } = await supabase
@@ -101,7 +123,7 @@ Deno.serve(async (req: Request) => {
         .is("used_at", null)
         .gt("expires_at", new Date().toISOString())
         .maybeSingle();
-      if (!stateRow) return jsonResponse({ error: "OAuth state is invalid or expired." }, 400);
+      if (!stateRow) return jsonResponse(req, { error: "OAuth state is invalid or expired." }, 400);
 
       const { data: claimedState } = await supabase
         .from("oauth_states")
@@ -110,7 +132,7 @@ Deno.serve(async (req: Request) => {
         .is("used_at", null)
         .select("id")
         .maybeSingle();
-      if (!claimedState) return jsonResponse({ error: "OAuth state is invalid or already used." }, 400);
+      if (!claimedState) return jsonResponse(req, { error: "OAuth state is invalid or already used." }, 400);
 
       const { data: config, error: configError } = await supabase
         .from("oauth_configs")
@@ -118,7 +140,7 @@ Deno.serve(async (req: Request) => {
         .eq("provider", provider)
         .eq("enabled", true)
         .maybeSingle();
-      if (configError || !config) return jsonResponse({ error: "OAuth provider is not configured." }, 404);
+      if (configError || !config) return jsonResponse(req, { error: "OAuth provider is not configured." }, 404);
       validateProviderUrl(config.token_url);
       validateProviderUrl(config.userinfo_url);
 
@@ -134,21 +156,21 @@ Deno.serve(async (req: Request) => {
           redirect_uri: redirectUri,
         }),
       });
-      if (!tokenResp.ok) return jsonResponse({ error: "Token exchange failed." }, 502);
+      if (!tokenResp.ok) return jsonResponse(req, { error: "Token exchange failed." }, 502);
 
       const tokenData = await tokenResp.json();
       if (typeof tokenData.access_token !== "string" || tokenData.access_token.length > 10000) {
-        return jsonResponse({ error: "No access token returned from provider." }, 502);
+        return jsonResponse(req, { error: "No access token returned from provider." }, 502);
       }
 
       const userInfoResp = await fetch(config.userinfo_url, {
         headers: { Authorization: `Bearer ${tokenData.access_token}` },
       });
-      if (!userInfoResp.ok) return jsonResponse({ error: "Failed to fetch user info from provider." }, 502);
+      if (!userInfoResp.ok) return jsonResponse(req, { error: "Failed to fetch user info from provider." }, 502);
 
       const userInfo = await userInfoResp.json();
       if (typeof userInfo.sub !== "string" || typeof userInfo.email !== "string") {
-        return jsonResponse({ error: "Incomplete user info from provider." }, 502);
+        return jsonResponse(req, { error: "Incomplete user info from provider." }, 502);
       }
 
       // Use the profile-linking function to prevent duplicate profiles
@@ -162,12 +184,12 @@ Deno.serve(async (req: Request) => {
         p_email_verified: emailVerified,
       });
 
-      if (linkError) return jsonResponse({ error: "Failed to link or create user profile." }, 500);
+      if (linkError) return jsonResponse(req, { error: "Failed to link or create user profile." }, 500);
 
       const result = linkResult as { user_id?: string; is_new?: boolean; action?: string; error?: string };
 
       if (result.error) {
-        return jsonResponse({ error: result.error, action: result.action ?? "unknown" }, 403);
+        return jsonResponse(req, { error: result.error, action: result.action ?? "unknown" }, 403);
       }
 
       // Fetch the full user record for the response
@@ -177,19 +199,19 @@ Deno.serve(async (req: Request) => {
         .eq("id", result.user_id!)
         .maybeSingle();
 
-      if (!userProfile) return jsonResponse({ error: "Profile created but could not be retrieved." }, 500);
-      return jsonResponse({ user: userProfile, isNew: result.is_new ?? false, action: result.action ?? "existing" });
+      if (!userProfile) return jsonResponse(req, { error: "Profile created but could not be retrieved." }, 500);
+      return jsonResponse(req, { user: userProfile, isNew: result.is_new ?? false, action: result.action ?? "existing" });
     }
 
     if (urlAction === "providers") {
       const { data, error } = await supabase.from("oauth_configs").select("id, provider, enabled").eq("enabled", true);
-      if (error) return jsonResponse({ error: "Failed to list providers." }, 500);
-      return jsonResponse({ providers: data ?? [] });
+      if (error) return jsonResponse(req, { error: "Failed to list providers." }, 500);
+      return jsonResponse(req, { providers: data ?? [] });
     }
 
-    return jsonResponse({ error: "Unknown action." }, 400);
+    return jsonResponse(req, { error: "Unknown action." }, 400);
   } catch (err) {
     console.error("oauth request failed", err);
-    return jsonResponse({ error: "The OAuth request could not be completed." }, 500);
+    return jsonResponse(req, { error: "The OAuth request could not be completed." }, 500);
   }
 });

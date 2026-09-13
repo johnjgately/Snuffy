@@ -9,6 +9,7 @@ import {
   Cpu, Database, FileText, Workflow, Activity, TrendingUp, Mic, ShieldCheck,
   Zap, Clock, ArrowRight, GraduationCap, Library, Globe, Plug, AlertTriangle,
   CheckCircle2, Server, Eye, Lock, Radio, Layers, Gauge, Boxes, Sparkles,
+  Key, History, FileArchive,
 } from 'lucide-react';
 
 interface HealthItem { label: string; status: 'healthy' | 'degraded' | 'offline' | 'connected' | 'error' | 'disconnected'; detail: string; }
@@ -44,7 +45,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
 
   useEffect(() => { loadRecentLogs(); }, [loadRecentLogs]);
 
-  // Derived metrics
   const totalTokens = demoAIConnections.reduce((s, c) => s + c.usageTokens, 0);
   const totalCost = demoAIConnections.reduce((s, c) => s + c.usageCost, 0);
   const costLimit = 200;
@@ -96,6 +96,21 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
 
   const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+
+  const readinessItems = [
+    { name: 'TOTP MFA Verification', status: 'Release Blocker', tone: 'danger' as const, icon: ShieldCheck },
+    { name: 'Secure Email Delivery', status: 'Release Blocker', tone: 'danger' as const, icon: Lock },
+    { name: 'Enforced Rate Limiting', status: 'Release Blocker', tone: 'danger' as const, icon: Activity },
+    { name: 'Production CORS & CSP', status: 'Release Blocker', tone: 'danger' as const, icon: Globe },
+    { name: 'Malware Scanning & Quarantine', status: 'Release Blocker', tone: 'danger' as const, icon: FileText },
+    { name: 'Backup & DR Testing', status: 'Release Blocker', tone: 'danger' as const, icon: FileArchive },
+    { name: 'Authenticated Auth Tests', status: 'Release Blocker', tone: 'danger' as const, icon: CheckCircle2 },
+    { name: 'Audit Chain Anchoring', status: 'Implemented', tone: 'warning' as const, icon: History },
+    { name: 'RBAC Authorization', status: 'Verified', tone: 'success' as const, icon: ShieldCheck },
+    { name: 'Emergency Stop System', status: 'Verified', tone: 'success' as const, icon: AlertTriangle },
+    { name: 'Multi-Tenant Isolation', status: 'Verified', tone: 'success' as const, icon: Server },
+    { name: 'OAuth2 SSO', status: 'Verified', tone: 'success' as const, icon: Key },
+  ];
 
   return (
     <div className="animate-fade-in">
@@ -271,7 +286,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
               <p className="text-xl font-semibold mt-1">{formatCost(totalCost)}</p>
             </div>
           </div>
-          {/* Budget bar */}
           <div className="mb-4">
             <div className="flex items-center justify-between text-xs mb-1.5">
               <span className="text-ink-muted">Monthly budget</span>
@@ -284,7 +298,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
               />
             </div>
           </div>
-          {/* Per-provider breakdown */}
           <div className="space-y-2.5">
             {demoAIConnections.filter((c) => c.enabled).slice(0, 4).map((c) => {
               const pct = totalCost > 0 ? Math.min(100, (c.usageCost / costLimit) * 100) : 0;
@@ -309,7 +322,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
 
       {/* Activity + Data Sources + Training Pipeline */}
       <div className="grid lg:grid-cols-3 gap-4 mb-6">
-        {/* Recent Activity */}
         <Card className="p-5">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -334,7 +346,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
           </div>
         </Card>
 
-        {/* Permitted Data Sources */}
         <Card className="p-5">
           <div className="flex items-center gap-2 mb-4">
             <ShieldCheck className="h-4 w-4 text-success" aria-hidden="true" />
@@ -367,7 +378,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
           </div>
         </Card>
 
-        {/* AI Training Pipeline */}
         <Card className="p-5">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -404,7 +414,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
 
       {/* Bottom row: Active Automations + Integrations */}
       <div className="grid lg:grid-cols-2 gap-4">
-        {/* Active Automations */}
         <Card className="p-5">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -441,7 +450,6 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
           </div>
         </Card>
 
-        {/* Integrations */}
         <Card className="p-5">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -473,6 +481,37 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: SectionId) => void }
           </div>
         </Card>
       </div>
+
+      {/* Production Readiness */}
+      <Card className="mt-6 p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-warning" aria-hidden="true" />
+            <h3 className="text-sm font-semibold">Production Readiness</h3>
+          </div>
+          <Badge tone="warning">7 release blockers</Badge>
+        </div>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          {readinessItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <div key={item.name} className="flex items-center gap-2.5 p-2.5 rounded-lg bg-bg-base/50 border border-bg-border">
+                <Icon className="h-3.5 w-3.5 shrink-0 text-ink-secondary" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-ink-primary truncate">{item.name}</p>
+                </div>
+                <Badge tone={item.tone}>{item.status}</Badge>
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-3 pt-3 border-t border-bg-border">
+          <p className="text-xs text-ink-muted">
+            Items marked Release Blocker must be fully implemented before production deployment.
+            See Technical Documentation for the complete readiness matrix with owners, tests, and dependencies.
+          </p>
+        </div>
+      </Card>
 
       {/* Security footer */}
       <Card className="mt-6 p-4">

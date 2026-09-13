@@ -1,11 +1,54 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
+const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+const isProduction = Deno.env.get("APP_ENV") === "production";
+
+function getCorsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get("Origin") ?? "";
+  if (isProduction) {
+    if (ALLOWED_ORIGINS.length > 0 && ALLOWED_ORIGINS.includes(origin)) {
+      return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+      };
+    }
+    return {
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+      "Vary": "Origin",
+    };
+  }
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+  };
+}
+
+function getClientIP(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
+async function getUserRole(supabase: ReturnType<typeof createClient>, userId: string): Promise<string> {
+  const { data } = await supabase.from("app_roles").select("role").eq("user_id", userId).maybeSingle();
+  if (!data) return "standard";
+  return data.role === "admin" ? "platform_admin" : "standard";
+}
+
+async function checkRate(supabase: ReturnType<typeof createClient>, endpoint: string, identifier: string, roleTier: string, ip: string, userId: string | null): Promise<{ allowed: boolean; retryAfter: number }> {
+  const { data, error } = await supabase.rpc("check_rate_limit", {
+    p_endpoint: endpoint, p_scope: "user", p_identifier: identifier, p_role_tier: roleTier, p_ip: ip, p_user_id: userId ?? null,
+  });
+  if (error || !data) return { allowed: true, retryAfter: 0 };
+  const result = data as { allowed: boolean; retry_after: number };
+  return { allowed: result.allowed, retryAfter: result.retry_after ?? 0 };
+}
 
 interface NormalizedResult {
   title: string;
@@ -34,10 +77,17 @@ interface SearchResponse {
   executionTimeMs: number;
 }
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(req: Request, body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json" },
+  });
+}
+
+function rateLimitResponse(req: Request, retryAfter: number): Response {
+  return new Response(JSON.stringify({ error: "Rate limit exceeded.", retry_after: retryAfter }), {
+    status: 429,
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json", "Retry-After": String(retryAfter) },
   });
 }
 
@@ -409,7 +459,7 @@ async function verifyUser(req: Request, supabase: ReturnType<typeof createClient
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
+    return new Response(null, { status: 200, headers: getCorsHeaders(req) });
   }
 
   try {
@@ -419,7 +469,10 @@ Deno.serve(async (req: Request) => {
     );
 
     const user = await verifyUser(req, supabase);
-    if (!user) return jsonResponse({ error: "Unauthorized." }, 401);
+    if (!user) return jsonResponse(req, { error: "Unauthorized." }, 401);
+
+    const ip = getClientIP(req);
+    const roleTier = await getUserRole(supabase, user.id);
 
     const body = await req.json();
     const { action } = body;
@@ -442,6 +495,9 @@ Deno.serve(async (req: Request) => {
     };
 
     if (action === "search") {
+      const rl = await checkRate(supabase, "web-search", user.id, roleTier, ip, user.id);
+      if (!rl.allowed) return rateLimitResponse(req, rl.retryAfter);
+
       const opts: SearchOptions = {
         query: body.query,
         maxResults: body.maxResults,
@@ -451,7 +507,7 @@ Deno.serve(async (req: Request) => {
       };
 
       if (!opts.query || !opts.query.trim()) {
-        return jsonResponse({ error: "No search query provided." }, 400);
+        return jsonResponse(req, { error: "No search query provided." }, 400);
       }
 
       const result = await performSearch(
@@ -463,13 +519,13 @@ Deno.serve(async (req: Request) => {
         body.aiModel,
       );
 
-      return jsonResponse(result);
+      return jsonResponse(req, result);
     }
 
     if (action === "health") {
       const provider = body.provider ?? "brave";
       const health = await checkHealth(provider);
-      return jsonResponse({ provider, ...health });
+      return jsonResponse(req, { provider, ...health });
     }
 
     if (action === "test") {
@@ -487,11 +543,11 @@ Deno.serve(async (req: Request) => {
         testResults = r.results;
       }
 
-      return jsonResponse({ provider, health, testResults });
+      return jsonResponse(req, { provider, health, testResults });
     }
 
     if (action === "getSettings") {
-      return jsonResponse({ settings });
+      return jsonResponse(req, { settings });
     }
 
     if (action === "updateSettings") {
@@ -500,7 +556,7 @@ Deno.serve(async (req: Request) => {
         .select("role")
         .eq("user_id", user.id)
         .maybeSingle();
-      if (roleData?.role !== "admin") return jsonResponse({ error: "Admin access required." }, 403);
+      if (roleData?.role !== "admin") return jsonResponse(req, { error: "Admin access required." }, 403);
 
       const updates = body.settings ?? {};
       const cleanEnabled = typeof updates.enabled === "boolean" ? updates.enabled : settings.enabled;
@@ -527,7 +583,7 @@ Deno.serve(async (req: Request) => {
             updated_at: new Date().toISOString(),
           })
           .eq("id", settingsRow.id);
-        if (error) return jsonResponse({ error: "Failed to update settings." }, 500);
+        if (error) return jsonResponse(req, { error: "Failed to update settings." }, 500);
       } else {
         const { error } = await supabase.from("search_settings").insert({
           enabled: cleanEnabled,
@@ -539,14 +595,14 @@ Deno.serve(async (req: Request) => {
           safe_search: cleanSafeSearch,
           timeout_ms: cleanTimeout,
         });
-        if (error) return jsonResponse({ error: "Failed to create settings." }, 500);
+        if (error) return jsonResponse(req, { error: "Failed to create settings." }, 500);
       }
-      return jsonResponse({ success: true });
+      return jsonResponse(req, { success: true });
     }
 
-    return jsonResponse({ error: "Unknown action." }, 400);
+    return jsonResponse(req, { error: "Unknown action." }, 400);
   } catch (err) {
     console.error("web-search request failed", err);
-    return jsonResponse({ error: "The search request could not be completed." }, 500);
+    return jsonResponse(req, { error: "The search request could not be completed." }, 500);
   }
 });

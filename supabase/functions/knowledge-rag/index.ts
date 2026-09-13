@@ -1,16 +1,66 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
+const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+const isProduction = Deno.env.get("APP_ENV") === "production";
 
-function jsonResponse(body: unknown, status = 200) {
+function getCorsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get("Origin") ?? "";
+  if (isProduction) {
+    if (ALLOWED_ORIGINS.length > 0 && ALLOWED_ORIGINS.includes(origin)) {
+      return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+      };
+    }
+    return {
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+      "Vary": "Origin",
+    };
+  }
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+  };
+}
+
+function getClientIP(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
+async function getUserRole(supabase: ReturnType<typeof createClient>, userId: string): Promise<string> {
+  const { data } = await supabase.from("app_roles").select("role").eq("user_id", userId).maybeSingle();
+  if (!data) return "standard";
+  return data.role === "admin" ? "platform_admin" : "standard";
+}
+
+async function checkRate(supabase: ReturnType<typeof createClient>, endpoint: string, identifier: string, roleTier: string, ip: string, userId: string | null): Promise<{ allowed: boolean; retryAfter: number }> {
+  const { data, error } = await supabase.rpc("check_rate_limit", {
+    p_endpoint: endpoint, p_scope: "user", p_identifier: identifier, p_role_tier: roleTier, p_ip: ip, p_user_id: userId ?? null,
+  });
+  if (error || !data) return { allowed: true, retryAfter: 0 };
+  const result = data as { allowed: boolean; retry_after: number };
+  return { allowed: result.allowed, retryAfter: result.retry_after ?? 0 };
+}
+
+function jsonResponse(req: Request, body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json" },
+  });
+}
+
+function rateLimitResponse(req: Request, retryAfter: number): Response {
+  return new Response(JSON.stringify({ error: "Rate limit exceeded.", retry_after: retryAfter }), {
+    status: 429,
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json", "Retry-After": String(retryAfter) },
   });
 }
 
@@ -245,7 +295,7 @@ async function verifyUser(req: Request, supabase: ReturnType<typeof createClient
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
+    return new Response(null, { status: 200, headers: getCorsHeaders(req) });
   }
 
   try {
@@ -255,7 +305,10 @@ Deno.serve(async (req: Request) => {
     );
 
     const user = await verifyUser(req, supabase);
-    if (!user) return jsonResponse({ error: "Unauthorized." }, 401);
+    if (!user) return jsonResponse(req, { error: "Unauthorized." }, 401);
+
+    const ip = getClientIP(req);
+    const roleTier = await getUserRole(supabase, user.id);
 
     const body = await req.json();
     const { action } = body;
@@ -263,8 +316,11 @@ Deno.serve(async (req: Request) => {
 
     // --- Process document ---
     if (action === "process") {
+      const rl = await checkRate(supabase, "knowledge-upload", user.id, roleTier, ip, user.id);
+      if (!rl.allowed) return rateLimitResponse(req, rl.retryAfter);
+
       const { documentId } = body;
-      if (!documentId) return jsonResponse({ error: "No documentId provided." }, 400);
+      if (!documentId) return jsonResponse(req, { error: "No documentId provided." }, 400);
 
       const { data: doc, error: docError } = await supabase
         .from("knowledge_documents")
@@ -273,7 +329,28 @@ Deno.serve(async (req: Request) => {
         .eq("user_id", user.id)
         .maybeSingle();
 
-      if (docError || !doc) return jsonResponse({ error: "Document not found." }, 404);
+      if (docError || !doc) return jsonResponse(req, { error: "Document not found." }, 404);
+
+      // Quarantine enforcement: do not process quarantined documents
+      if (doc.quarantined) {
+        return jsonResponse(req, { error: "Document is quarantined and cannot be processed until released." }, 403);
+      }
+      if (doc.legal_hold) {
+        return jsonResponse(req, { error: "Document is under legal hold and cannot be modified." }, 403);
+      }
+      // Check classification policy for RAG indexing permission
+      if (doc.classification) {
+        const { data: policy } = await supabase
+          .from("classification_policy_versions")
+          .select("rag_indexing_allowed")
+          .eq("classification", doc.classification)
+          .order("version", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (policy && !policy.rag_indexing_allowed) {
+          return jsonResponse(req, { error: `RAG indexing is not allowed for ${doc.classification} documents.` }, 403);
+        }
+      }
 
       // Update status to parsing
       await supabase.from("knowledge_documents").update({
@@ -325,7 +402,7 @@ Deno.serve(async (req: Request) => {
           processing_error: "No text content could be extracted from this file.",
           updated_at: new Date().toISOString(),
         }).eq("id", documentId).eq("user_id", user.id);
-        return jsonResponse({ error: "No text content extracted." }, 400);
+        return jsonResponse(req, { error: "No text content extracted." }, 400);
       }
 
       // Update to embedding stage
@@ -380,7 +457,7 @@ Deno.serve(async (req: Request) => {
         });
       } catch { /* best-effort */ }
 
-      return jsonResponse({
+      return jsonResponse(req, {
         success: true,
         documentId,
         chunks: allChunks.length,
@@ -391,8 +468,11 @@ Deno.serve(async (req: Request) => {
 
     // --- RAG Search ---
     if (action === "search") {
+      const rl = await checkRate(supabase, "web-search", user.id, roleTier, ip, user.id);
+      if (!rl.allowed) return rateLimitResponse(req, rl.retryAfter);
+
       const { query, knowledgeBaseIds, topK } = body;
-      if (!query || !query.trim()) return jsonResponse({ error: "No query provided." }, 400);
+      if (!query || !query.trim()) return jsonResponse(req, { error: "No query provided." }, 400);
 
       const results = await ragSearch(
         supabase,
@@ -414,13 +494,13 @@ Deno.serve(async (req: Request) => {
         });
       } catch { /* best-effort */ }
 
-      return jsonResponse({ results, query, totalResults: results.length });
+      return jsonResponse(req, { results, query, totalResults: results.length });
     }
 
     // --- RAG Query (search + format context) ---
     if (action === "rag-query") {
       const { query, knowledgeBaseIds, topK } = body;
-      if (!query || !query.trim()) return jsonResponse({ error: "No query provided." }, 400);
+      if (!query || !query.trim()) return jsonResponse(req, { error: "No query provided." }, 400);
 
       const results = await ragSearch(
         supabase,
@@ -462,7 +542,7 @@ Deno.serve(async (req: Request) => {
         return source;
       });
 
-      return jsonResponse({
+      return jsonResponse(req, {
         results,
         context,
         citations,
@@ -497,7 +577,7 @@ Deno.serve(async (req: Request) => {
       const totalChunks = vecError ? 0 : (healthData?.total_chunks ?? 0);
       const embeddedChunks = vecError ? 0 : (healthData?.embedded_chunks ?? 0);
 
-      return jsonResponse({
+      return jsonResponse(req, {
         embedding: {
           provider: settings.embedding_provider,
           model: settings.embedding_model,
@@ -516,7 +596,7 @@ Deno.serve(async (req: Request) => {
 
     // --- Get Settings ---
     if (action === "getSettings") {
-      return jsonResponse({ settings });
+      return jsonResponse(req, { settings });
     }
 
     // --- Update Settings (admin only) ---
@@ -526,7 +606,7 @@ Deno.serve(async (req: Request) => {
         .select("role")
         .eq("user_id", user.id)
         .maybeSingle();
-      if (roleData?.role !== "admin") return jsonResponse({ error: "Admin access required." }, 403);
+      if (roleData?.role !== "admin") return jsonResponse(req, { error: "Admin access required." }, 403);
 
       const updates = body.settings ?? {};
       const cleanEndpoint = typeof updates.embeddingEndpoint === "string" ? updates.embeddingEndpoint : settings.embedding_endpoint;
@@ -560,7 +640,7 @@ Deno.serve(async (req: Request) => {
           chunk_overlap: cleanChunkOverlap,
         });
       }
-      return jsonResponse({ success: true });
+      return jsonResponse(req, { success: true });
     }
 
     // --- Get Stats ---
@@ -572,7 +652,7 @@ Deno.serve(async (req: Request) => {
         supabase.from("knowledge_documents").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("status", "ready"),
       ]);
 
-      return jsonResponse({
+      return jsonResponse(req, {
         knowledgeBases: kbResult.count ?? 0,
         documents: docResult.count ?? 0,
         chunks: chunkResult.count ?? 0,
@@ -580,9 +660,9 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    return jsonResponse({ error: `Unknown action: ${action}` }, 400);
+    return jsonResponse(req, { error: `Unknown action: ${action}` }, 400);
   } catch (err) {
     console.error('knowledge-rag request failed', err);
-    return jsonResponse({ error: "The knowledge request could not be completed." }, 500);
+    return jsonResponse(req, { error: "The knowledge request could not be completed." }, 500);
   }
 });

@@ -1,11 +1,54 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
+const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+const isProduction = Deno.env.get("APP_ENV") === "production";
+
+function getCorsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get("Origin") ?? "";
+  if (isProduction) {
+    if (ALLOWED_ORIGINS.length > 0 && ALLOWED_ORIGINS.includes(origin)) {
+      return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+      };
+    }
+    return {
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+      "Vary": "Origin",
+    };
+  }
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+  };
+}
+
+function getClientIP(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
+async function getUserRole(supabase: ReturnType<typeof createClient>, userId: string): Promise<string> {
+  const { data } = await supabase.from("app_roles").select("role").eq("user_id", userId).maybeSingle();
+  if (!data) return "standard";
+  return data.role === "admin" ? "platform_admin" : "standard";
+}
+
+async function checkRate(supabase: ReturnType<typeof createClient>, endpoint: string, identifier: string, roleTier: string, ip: string, userId: string | null): Promise<{ allowed: boolean; retryAfter: number }> {
+  const { data, error } = await supabase.rpc("check_rate_limit", {
+    p_endpoint: endpoint, p_scope: "user", p_identifier: identifier, p_role_tier: roleTier, p_ip: ip, p_user_id: userId ?? null,
+  });
+  if (error || !data) return { allowed: true, retryAfter: 0 };
+  const result = data as { allowed: boolean; retry_after: number };
+  return { allowed: result.allowed, retryAfter: result.retry_after ?? 0 };
+}
 
 interface ConnectionRow {
   id: string;
@@ -20,10 +63,17 @@ interface ConnectionRow {
   key_masked: string | null;
 }
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(req: Request, body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json" },
+  });
+}
+
+function rateLimitResponse(req: Request, retryAfter: number): Response {
+  return new Response(JSON.stringify({ error: "Rate limit exceeded.", retry_after: retryAfter }), {
+    status: 429,
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json", "Retry-After": String(retryAfter) },
   });
 }
 
@@ -159,7 +209,7 @@ async function verifyUser(req: Request, supabase: ReturnType<typeof createClient
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
+    return new Response(null, { status: 200, headers: getCorsHeaders(req) });
   }
 
   try {
@@ -169,15 +219,24 @@ Deno.serve(async (req: Request) => {
     );
 
     const user = await verifyUser(req, supabase);
-    if (!user) return jsonResponse({ error: "Unauthorized." }, 401);
+    if (!user) return jsonResponse(req, { error: "Unauthorized." }, 401);
 
+    const ip = getClientIP(req);
+    const roleTier = await getUserRole(supabase, user.id);
+
+    // Rate limit for chat action
     const body = await req.json();
     const { action, connectionId, prompt, model } = body;
+
+    if (action === "chat" || action === "test") {
+      const rl = await checkRate(supabase, "ai-chat", user.id, roleTier, ip, user.id);
+      if (!rl.allowed) return rateLimitResponse(req, rl.retryAfter);
+    }
     if (typeof connectionId !== 'string' || connectionId.length > 100) {
-      return jsonResponse({ error: 'Invalid connection.' }, 400);
+      return jsonResponse(req, { error: 'Invalid connection.' }, 400);
     }
     if (typeof model !== 'undefined' && (typeof model !== 'string' || model.length > 200)) {
-      return jsonResponse({ error: 'Invalid model.' }, 400);
+      return jsonResponse(req, { error: 'Invalid model.' }, 400);
     }
 
     // Fetch the connection (using service role to get api_key)
@@ -189,7 +248,7 @@ Deno.serve(async (req: Request) => {
       .single<ConnectionRow>();
 
     if (connError || !conn) {
-      return jsonResponse({ error: "Connection not found." }, 404);
+      return jsonResponse(req, { error: "Connection not found." }, 404);
     }
 
     const provider = conn.provider.toLowerCase();
@@ -203,7 +262,7 @@ Deno.serve(async (req: Request) => {
 
       let result;
       if (provider.includes("google") || provider.includes("gemini")) {
-        if (!apiKey) return jsonResponse({ error: "No API key configured for this connection." }, 400);
+        if (!apiKey) return jsonResponse(req, { error: "No API key configured for this connection." }, 400);
         const geminiModel = useModel || "gemini-2.0-flash";
         result = await callGemini(conn.endpoint, apiKey, geminiModel, testPrompt);
       } else if (provider.includes("ollama")) {
@@ -213,31 +272,29 @@ Deno.serve(async (req: Request) => {
         const lsModel = useModel || "local-model";
         result = await callLMStudio(conn.endpoint, apiKey, lsModel, testPrompt);
       } else {
-        // OpenAI, Anthropic, vLLM, OpenAI-compatible — all use OpenAI-compatible chat format
         if (!apiKey && conn.kind === "cloud") {
-          return jsonResponse({ error: "No API key configured for this connection." }, 400);
+          return jsonResponse(req, { error: "No API key configured for this connection." }, 400);
         }
         const chatModel = useModel || "gpt-4o-mini";
         result = await callOpenAICompatible(conn.endpoint, apiKey, chatModel, testPrompt);
       }
 
-      // Update status to healthy
       await supabase.from("ai_connections").update({ status: "healthy" }).eq("id", connectionId).eq("owner_user_id", user.id);
 
-      return jsonResponse({ success: true, status: "healthy", reply: result.text });
+      return jsonResponse(req, { success: true, status: "healthy", reply: result.text });
     }
 
     if (action === "chat") {
       if (typeof prompt !== 'string' || !prompt.trim()) {
-        return jsonResponse({ error: "No prompt provided." }, 400);
+        return jsonResponse(req, { error: "No prompt provided." }, 400);
       }
       if (prompt.length > 20000) {
-        return jsonResponse({ error: "Prompt is too long." }, 413);
+        return jsonResponse(req, { error: "Prompt is too long." }, 413);
       }
 
       let result;
       if (provider.includes("google") || provider.includes("gemini")) {
-        if (!apiKey) return jsonResponse({ error: "No API key configured." }, 400);
+        if (!apiKey) return jsonResponse(req, { error: "No API key configured." }, 400);
         const geminiModel = useModel || "gemini-2.0-flash";
         result = await callGemini(conn.endpoint, apiKey, geminiModel, prompt);
       } else if (provider.includes("ollama")) {
@@ -248,7 +305,7 @@ Deno.serve(async (req: Request) => {
         result = await callLMStudio(conn.endpoint, apiKey, lsModel, prompt);
       } else {
         if (!apiKey && conn.kind === "cloud") {
-          return jsonResponse({ error: "No API key configured." }, 400);
+          return jsonResponse(req, { error: "No API key configured." }, 400);
         }
         const chatModel = useModel || "gpt-4o-mini";
         result = await callOpenAICompatible(conn.endpoint, apiKey, chatModel, prompt);
@@ -261,12 +318,12 @@ Deno.serve(async (req: Request) => {
         token_count: tokens,
       }).then(() => {});
 
-      return jsonResponse({ reply: result.text, usage: result.usage });
+      return jsonResponse(req, { reply: result.text, usage: result.usage });
     }
 
-    return jsonResponse({ error: `Unknown action: ${action}` }, 400);
+    return jsonResponse(req, { error: `Unknown action: ${action}` }, 400);
   } catch (err) {
     console.error('ai-proxy request failed', err);
-    return jsonResponse({ error: "The AI request could not be completed." }, 500);
+    return jsonResponse(req, { error: "The AI request could not be completed." }, 500);
   }
 });
