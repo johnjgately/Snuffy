@@ -185,7 +185,7 @@ Deno.serve(async (req: Request) => {
       .from("ai_connections")
       .select("id, name, kind, provider, endpoint, models, enabled, status, api_key, key_masked")
       .eq("id", connectionId)
-      .eq("user_id", user.id)
+      .eq("owner_user_id", user.id)
       .single<ConnectionRow>();
 
     if (connError || !conn) {
@@ -222,7 +222,7 @@ Deno.serve(async (req: Request) => {
       }
 
       // Update status to healthy
-      await supabase.from("ai_connections").update({ status: "healthy" }).eq("id", connectionId).eq("user_id", user.id);
+      await supabase.from("ai_connections").update({ status: "healthy" }).eq("id", connectionId).eq("owner_user_id", user.id);
 
       return jsonResponse({ success: true, status: "healthy", reply: result.text });
     }
