@@ -4,7 +4,7 @@
 **Product:** Snuffy — AI Command Assistant
 **Frontend:** React 18, TypeScript, Vite
 **Backend platform:** Supabase
-**Last reviewed:** 2026-09-12
+**Last reviewed:** 2026-09-13
 **Version:** 2.0.0
 **Commit:** `security-hardening-v2`
 **Migration range:** `20260824210621` – `20260912206000`
