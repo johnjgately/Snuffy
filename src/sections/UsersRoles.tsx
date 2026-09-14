@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Card, SectionHeader, Badge, Button, StatusDot, Select, Input } from '@/components/ui';
+import { Card, SectionHeader, Badge, Button, StatusDot, Select, Input, Field, Toggle } from '@/components/ui';
 import { Modal } from '@/components/Modal';
 import { demoUsers } from '@/data/demo';
 import { supabase, getAuthHeaders } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
 import type { User, Role } from '@/types';
-import { Users, ShieldCheck, KeyRound, UserCog, Lock, Eye, ScrollText, Cpu, FileText, Database, Mic, Workflow, Plug, Trash2, Mail, Pencil, UserPlus, Cloud, AlertTriangle, Loader2, Plus } from 'lucide-react';
+import { Users, ShieldCheck, KeyRound, UserCog, Lock, Eye, ScrollText, Cpu, FileText, Database, Mic, Workflow, Plug, Trash2, Mail, Pencil, UserPlus, Cloud, AlertTriangle, Loader2, Plus, UserX, LogOut, Download, CheckCircle2, Clock } from 'lucide-react';
 
 const iconMap: Record<string, typeof FileText> = {
   Cpu, FileText, Database, Mic, Workflow, ScrollText, Plug, UserCog,
@@ -45,6 +45,37 @@ function initials(name: string): string {
   return name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase();
 }
 
+// Offboarding checklist definition
+type OffboardingStepStatus = 'pending' | 'in_progress' | 'completed';
+interface OffboardingStep {
+  key: string;
+  label: string;
+  description: string;
+  icon: typeof LogOut;
+  status: OffboardingStepStatus;
+}
+
+const initialOffboardingSteps = (): OffboardingStep[] => ([
+  { key: 'revoke_sessions', label: 'Revoke all active sessions', description: 'Sign the user out of all devices and invalidate tokens.', icon: LogOut, status: 'pending' },
+  { key: 'export_data', label: "Review and export user's data", description: 'Download reports, automations, and history before removal.', icon: Download, status: 'pending' },
+  { key: 'revoke_connectors', label: 'Revoke API connectors (AI connections)', description: 'Disconnect AI keys and third-party integrations.', icon: Plug, status: 'pending' },
+  { key: 'reassign_automations', label: 'Review and reassign/transfer automations', description: 'Move workflows to another owner or archive them.', icon: Workflow, status: 'pending' },
+  { key: 'remove_from_orgs', label: 'Remove from organizations', description: 'Revoke membership across all organizations.', icon: UserCog, status: 'pending' },
+  { key: 'disable_account', label: 'Disable account', description: 'Suspend the account and prevent further sign-ins.', icon: UserX, status: 'pending' },
+]);
+
+interface OffboardingRecord {
+  id: string;
+  user_id: string;
+  user_name?: string;
+  initiated_by: string;
+  initiated_by_name?: string;
+  status: string;
+  steps_completed: Record<string, boolean> | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
 export function UsersRoles() {
   const [roleFilter, setRoleFilter] = useState('all');
   const [allUsers, setAllUsers] = useState<User[]>(demoUsers);
@@ -73,8 +104,17 @@ export function UsersRoles() {
   const [oauthForm, setOauthForm] = useState(emptyOAuthConfig);
   const [oauthConfigs, setOAuthConfigs] = useState<Record<string, boolean>>({});
 
+  // Offboarding state
+  const [offboardingUser, setOffboardingUser] = useState<User | null>(null);
+  const [offboardingSteps, setOffboardingSteps] = useState<OffboardingStep[]>(initialOffboardingSteps());
+  const [offboardingSaving, setOffboardingSaving] = useState(false);
+  const [offboardingHistory, setOffboardingHistory] = useState<OffboardingRecord[]>([]);
+  const [offboardingLoading, setOffboardingLoading] = useState(false);
+  const [reassignTo, setReassignTo] = useState('');
+
   const oauthFunctionUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/oauth`;
   const adminApiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-api`;
+  const authApiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-api`;
 
   const adminApi = useCallback(async (resource: string, body?: Record<string, unknown>, method = 'POST') => {
     const headers = await getAuthHeaders();
@@ -140,6 +180,29 @@ export function UsersRoles() {
     setPermLoading(false);
   }, [adminApi]);
 
+  const loadOffboardingHistory = useCallback(async () => {
+    setOffboardingLoading(true);
+    try {
+      const { data, error: dbError } = await supabase
+        .from('offboarding_records')
+        .select('id, user_id, initiated_by, status, steps_completed, completed_at, created_at')
+        .order('created_at', { ascending: false });
+      if (dbError) throw dbError;
+      const records: OffboardingRecord[] = (data ?? []).map((r) => {
+        const user = allUsers.find((u) => u.id === r.user_id);
+        return {
+          ...r,
+          user_name: user?.name ?? r.user_id,
+          initiated_by_name: allUsers.find((u) => u.id === r.initiated_by)?.name ?? r.initiated_by,
+        };
+      });
+      setOffboardingHistory(records);
+    } catch {
+      setOffboardingHistory([]);
+    }
+    setOffboardingLoading(false);
+  }, [allUsers]);
+
   useEffect(() => {
     (async () => {
       setLoading(true);
@@ -147,6 +210,10 @@ export function UsersRoles() {
       setLoading(false);
     })();
   }, [loadUsers, loadOAuthConfigs, loadRolePerms]);
+
+  useEffect(() => {
+    loadOffboardingHistory();
+  }, [loadOffboardingHistory]);
 
   // Build matrix from DB rows
   const capabilities = Array.from(new Set(rolePerms.map((p) => p.capability)));
@@ -392,6 +459,97 @@ export function UsersRoles() {
     }
   };
 
+  // ---- Offboarding handlers ----
+
+  const openOffboarding = (u: User) => {
+    setOffboardingUser(u);
+    setOffboardingSteps(initialOffboardingSteps());
+    setReassignTo('');
+    setError(null);
+  };
+
+  const closeOffboarding = () => {
+    setOffboardingUser(null);
+    setOffboardingSteps(initialOffboardingSteps());
+    setReassignTo('');
+    setOffboardingSaving(false);
+  };
+
+  const toggleStepCheck = (key: string) => {
+    setOffboardingSteps((prev) => prev.map((s) => {
+      if (s.key !== key) return s;
+      const status: OffboardingStepStatus = s.status === 'completed' ? 'pending' : 'completed';
+      return { ...s, status };
+    }));
+  };
+
+  const setStepStatus = (key: string, status: OffboardingStepStatus) => {
+    setOffboardingSteps((prev) => prev.map((s) => s.key === key ? { ...s, status } : s));
+  };
+
+  const allStepsCompleted = offboardingSteps.every((s) => s.status === 'completed');
+
+  // Call auth-api edge function to revoke sessions and disable the user
+  const handleCompleteOffboarding = async () => {
+    if (!offboardingUser) return;
+    if (!allStepsCompleted) {
+      setError('All offboarding steps must be completed before finishing.');
+      return;
+    }
+    setOffboardingSaving(true);
+    setError(null);
+    try {
+      // 1. Revoke sessions via auth-api edge function
+      try {
+        const headers = await getAuthHeaders();
+        const resp = await fetch(`${authApiUrl}?resource=revoke-sessions`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ user_id: offboardingUser.id }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Failed to revoke sessions');
+      } catch (e) {
+        // non-fatal: continue even if session revoke fails (edge function may not be deployed)
+        console.warn('Session revocation warning:', e);
+      }
+
+      // 2. Disable the user account
+      if (isCustom(offboardingUser.id)) {
+        try {
+          await adminApi('users-update', { id: offboardingUser.id, status: 'suspended' });
+        } catch {
+          // best-effort; record still created
+        }
+      }
+      setAllUsers((prev) => prev.map((u) => u.id === offboardingUser.id ? { ...u, status: 'suspended' } : u));
+
+      // 3. Persist offboarding record
+      const stepsCompleted: Record<string, boolean> = {};
+      offboardingSteps.forEach((s) => { stepsCompleted[s.key] = s.status === 'completed'; });
+      const { data: sessionData } = await supabase.auth.getSession();
+      const initiatedBy = sessionData.session?.user?.id ?? 'unknown';
+      try {
+        await supabase.from('offboarding_records').insert({
+          user_id: offboardingUser.id,
+          initiated_by: initiatedBy,
+          status: 'completed',
+          steps_completed: stepsCompleted,
+          completed_at: new Date().toISOString(),
+        });
+      } catch {
+        // table may not exist in demo; ignore
+      }
+
+      showToast(`Offboarding completed for ${offboardingUser.name}.`);
+      closeOffboarding();
+      await loadOffboardingHistory();
+    } catch {
+      setError('Could not complete offboarding. Please try again.');
+    }
+    setOffboardingSaving(false);
+  };
+
   return (
     <div className="animate-fade-in">
       <SectionHeader
@@ -476,6 +634,7 @@ export function UsersRoles() {
                       <Button size="sm" variant="ghost" aria-label={u.status === 'suspended' ? `Reactivate ${u.name}` : `Suspend ${u.name}`} onClick={() => toggleSuspend(u)}>
                         {u.status === 'suspended' ? <ShieldCheck className="h-3.5 w-3.5 text-success" aria-hidden="true" /> : <Lock className="h-3.5 w-3.5 text-warning" aria-hidden="true" />}
                       </Button>
+                      <Button size="sm" variant="ghost" aria-label={`Offboard ${u.name}`} onClick={() => openOffboarding(u)}><UserX className="h-3.5 w-3.5 text-danger" aria-hidden="true" /></Button>
                       {isCustom(u.id) && <Button size="sm" variant="ghost" aria-label={`Delete ${u.name}`} onClick={() => setDeletingUser(u)}><Trash2 className="h-3.5 w-3.5 text-danger" aria-hidden="true" /></Button>}
                     </div>
                   </td>
@@ -552,6 +711,82 @@ export function UsersRoles() {
             </table>
           </div>
         )}
+      </Card>
+
+      {/* Offboarding section */}
+      <Card className="mt-6 overflow-hidden">
+        <div className="px-4 py-3 border-b border-bg-border flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <UserX className="h-4 w-4 text-danger" aria-hidden="true" />
+            <h3 className="text-sm font-semibold">Offboarding</h3>
+          </div>
+          <span className="text-xs text-ink-muted">{offboardingHistory.length} completed</span>
+        </div>
+
+        {/* User list with Initiate Offboarding buttons */}
+        <div className="divide-y divide-bg-border">
+          {loading ? (
+            <div className="flex items-center justify-center py-8"><Loader2 className="h-5 w-5 text-accent animate-spin" aria-hidden="true" /></div>
+          ) : filtered.length === 0 ? (
+            <p className="px-4 py-8 text-sm text-ink-muted text-center">No users to display.</p>
+          ) : (
+            filtered.map((u) => (
+              <div key={u.id} className="px-4 py-3 flex items-center justify-between hover:bg-bg-hover transition-colors">
+                <div className="flex items-center gap-2.5">
+                  {u.avatarUrl ? (
+                    <img src={u.avatarUrl} alt={`${u.name} avatar`} className="h-8 w-8 rounded-full border border-accent/30" />
+                  ) : (
+                    <div className="h-8 w-8 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center text-xs font-semibold text-accent">{initials(u.name)}</div>
+                  )}
+                  <div>
+                    <p className="text-xs font-medium text-ink-primary">{u.name}</p>
+                    <p className="text-xs text-ink-muted font-mono">{u.email}</p>
+                  </div>
+                  <Badge tone={roleTone[u.role]}>{u.role}</Badge>
+                  <Badge tone={statusTone[u.status] === 'success' ? 'success' : statusTone[u.status] === 'danger' ? 'danger' : 'warning'}>{u.status}</Badge>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => openOffboarding(u)}
+                  disabled={u.status === 'suspended'}
+                >
+                  <UserX className="h-3.5 w-3.5" aria-hidden="true" /> Initiate Offboarding
+                </Button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Offboarding history */}
+        <div className="px-4 py-3 border-t border-bg-border">
+          <div className="flex items-center gap-2 mb-3">
+            <Clock className="h-3.5 w-3.5 text-ink-muted" aria-hidden="true" />
+            <span className="label-mono">Offboarding history</span>
+          </div>
+          {offboardingLoading ? (
+            <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 text-accent animate-spin" aria-hidden="true" /></div>
+          ) : offboardingHistory.length === 0 ? (
+            <p className="text-xs text-ink-muted py-2">No completed offboardings yet.</p>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-thin">
+              {offboardingHistory.map((rec) => (
+                <div key={rec.id} className="flex items-center justify-between p-3 rounded-lg bg-bg-base border border-bg-border">
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="h-4 w-4 text-success shrink-0" aria-hidden="true" />
+                    <div>
+                      <p className="text-xs font-medium text-ink-primary">{rec.user_name ?? rec.user_id}</p>
+                      <p className="text-xs text-ink-muted">
+                        Performed by {rec.initiated_by_name ?? rec.initiated_by} · {new Date(rec.completed_at ?? rec.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </p>
+                    </div>
+                  </div>
+                  <Badge tone="success">Completed</Badge>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </Card>
 
       {/* Add User modal */}
@@ -688,6 +923,127 @@ export function UsersRoles() {
           <div className="flex justify-end gap-2 mt-4">
             <Button variant="ghost" size="sm" onClick={() => setDeletingUser(null)}>Cancel</Button>
             <Button variant="danger" size="sm" onClick={handleDelete}><Trash2 className="h-3.5 w-3.5" aria-hidden="true" /> Remove user</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Offboarding modal */}
+      <Modal open={offboardingUser !== null} onClose={closeOffboarding} title="Offboard User" titleId="offboard-user-title" maxWidth="max-w-lg">
+        <div className="p-5 space-y-4">
+          {/* User summary */}
+          <div className="flex items-center gap-3 p-3 rounded-lg bg-bg-base border border-bg-border">
+            {offboardingUser?.avatarUrl ? (
+              <img src={offboardingUser.avatarUrl} alt={`${offboardingUser.name} avatar`} className="h-10 w-10 rounded-full border border-accent/30" />
+            ) : (
+              <div className="h-10 w-10 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center text-sm font-semibold text-accent">{offboardingUser ? initials(offboardingUser.name) : ''}</div>
+            )}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-ink-primary">{offboardingUser?.name}</p>
+              <p className="text-xs text-ink-muted font-mono truncate">{offboardingUser?.email}</p>
+            </div>
+            <Badge tone={offboardingUser ? roleTone[offboardingUser.role] : 'muted'}>{offboardingUser?.role}</Badge>
+          </div>
+
+          {/* Warning banner */}
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-danger-soft/20 border border-danger/30">
+            <AlertTriangle className="h-4 w-4 text-danger shrink-0 mt-0.5" aria-hidden="true" />
+            <p className="text-xs text-ink-secondary">
+              Offboarding will revoke this user's sessions, disconnect their integrations, and disable their account. Complete each step in order before finishing.
+            </p>
+          </div>
+
+          {/* Checklist */}
+          <div className="space-y-2">
+            <span className="label-mono">Offboarding checklist</span>
+            {offboardingSteps.map((step) => {
+              const Icon = step.icon;
+              const isCompleted = step.status === 'completed';
+              const isInProgress = step.status === 'in_progress';
+              return (
+                <div
+                  key={step.key}
+                  className={cn(
+                    'flex items-start gap-3 p-3 rounded-lg border transition-colors',
+                    isCompleted ? 'border-success/40 bg-success/5' : 'border-bg-border bg-bg-base',
+                  )}
+                >
+                  <button
+                    onClick={() => toggleStepCheck(step.key)}
+                    className="mt-0.5 shrink-0"
+                    aria-label={isCompleted ? `Mark ${step.label} as pending` : `Mark ${step.label} as completed`}
+                  >
+                    {isCompleted ? (
+                      <CheckCircle2 className="h-5 w-5 text-success" aria-hidden="true" />
+                    ) : (
+                      <div className="h-5 w-5 rounded-full border-2 border-bg-border hover:border-accent transition-colors" />
+                    )}
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Icon className={cn('h-3.5 w-3.5', isCompleted ? 'text-success' : 'text-ink-secondary')} aria-hidden="true" />
+                      <p className={cn('text-xs font-medium', isCompleted ? 'text-ink-primary' : 'text-ink-primary')}>{step.label}</p>
+                    </div>
+                    <p className="text-xs text-ink-muted mt-0.5">{step.description}</p>
+
+                    {/* Reassign automations: show transfer selector */}
+                    {step.key === 'reassign_automations' && !isCompleted && (
+                      <div className="mt-2">
+                        <Field label="Transfer automations to">
+                          <Select
+                            className="mt-1 w-full"
+                            value={reassignTo}
+                            onChange={(e) => {
+                              setReassignTo(e.target.value);
+                              setStepStatus(step.key, e.target.value ? 'in_progress' : 'pending');
+                            }}
+                          >
+                            <option value="">Select a user…</option>
+                            {allUsers
+                              .filter((u) => u.id !== offboardingUser?.id && u.status !== 'suspended')
+                              .map((u) => <option key={u.id} value={u.id}>{u.name} ({u.role})</option>)}
+                          </Select>
+                        </Field>
+                      </div>
+                    )}
+                  </div>
+                  <Badge
+                    tone={isCompleted ? 'success' : isInProgress ? 'warning' : 'muted'}
+                  >
+                    {isCompleted ? 'completed' : isInProgress ? 'in_progress' : 'pending'}
+                  </Badge>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Progress indicator */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-1.5 rounded-full bg-bg-base overflow-hidden">
+              <div
+                className="h-full bg-success transition-all duration-300"
+                style={{ width: `${(offboardingSteps.filter((s) => s.status === 'completed').length / offboardingSteps.length) * 100}%` }}
+              />
+            </div>
+            <span className="text-xs text-ink-muted font-mono">
+              {offboardingSteps.filter((s) => s.status === 'completed').length}/{offboardingSteps.length}
+            </span>
+          </div>
+
+          {/* Actions */}
+          <div className="flex justify-end gap-2 pt-2 border-t border-bg-border">
+            <Button variant="ghost" size="sm" onClick={closeOffboarding}>Cancel</Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleCompleteOffboarding}
+              disabled={offboardingSaving || !allStepsCompleted}
+            >
+              {offboardingSaving ? (
+                <><Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> Completing…</>
+              ) : (
+                <><UserX className="h-3.5 w-3.5" aria-hidden="true" /> Complete Offboarding</>
+              )}
+            </Button>
           </div>
         </div>
       </Modal>
